@@ -72,12 +72,17 @@ DEFAULT_EVIDENCE_DIR = EV.oak_v4("f20b")
 # printing the SID banner and `frames=` lines.
 SENDER_WHOLEBODY = "wholebody"
 SENDER_MULTIPERSON = "multiperson"
+# F-49: a recorded video in place of the camera. It takes none of the camera flags (no portrait, no
+# stereo, no IR) and a different set of its own, so it gets its own command shape rather than a
+# generic passthrough - the same reasoning as the other two.
+SENDER_VIDEO = "video"
 
 #: Script basename -> sender kind, so --script alone picks the right command shape and an operator
 #: cannot silently get the wrong one by forgetting a second flag.
 SENDER_BY_SCRIPT = {
     "wholebody_udp_sender.py": SENDER_WHOLEBODY,
     "multiperson_udp_sender.py": SENDER_MULTIPERSON,
+    "video_udp_sender.py": SENDER_VIDEO,
 }
 
 #: Must match multiperson_udp_sender.DEFAULT_DETECTOR. Spelled out rather than imported: importing
@@ -235,6 +240,8 @@ class Supervisor(object):
             return False, "sidecar script not found: %s" % self.args.script
         if self.args.model and not os.path.isfile(self.args.model):
             return False, "model file not found: %s" % self.args.model
+        if self.sender_kind() == SENDER_VIDEO and not self.args.video:
+            return False, "the video sender needs --video <path or link>"
         if (self.sender_kind() == SENDER_MULTIPERSON
                 and not os.path.isfile(MULTIPERSON_DETECTOR_BLOB)):
             return False, ("person detector blob not found: %s (fetch it with blobconverter - see "
@@ -294,6 +301,25 @@ class Supervisor(object):
                "--host", self.args.host, "--port", str(self.args.port)]
         if self.args.model:
             cmd += ["--model", self.args.model]
+
+        if self.sender_kind() == SENDER_VIDEO:
+            # F-49. Only what video_udp_sender.py's own argparse defines. None of the camera flags
+            # (--portrait, --subpixel-bits, --mono-res, --rgb-isp, --ir-dot) exist there, and none of
+            # them mean anything for a file, so they are NOT forwarded - passing one would make
+            # Python exit on an unrecognised flag before the clip was ever opened. --show is left out
+            # for the same reason: this sender has no preview window.
+            cmd += ["--video", self.args.video]
+            cmd += ["--loop", str(self.args.video_loop)]
+            cmd += ["--subject-height", str(self.args.video_subject_height)]
+            cmd += ["--hfov", str(self.args.video_hfov)]
+            if self.args.video_depth_range:
+                cmd += ["--depth-range", str(self.args.video_depth_range[0]),
+                        str(self.args.video_depth_range[1])]
+            if self.args.video_assume_measured:
+                cmd += ["--assume-measured"]
+            if self.args.video_cache_dir:
+                cmd += ["--cache-dir", self.args.video_cache_dir]
+            return cmd
 
         if self.sender_kind() == SENDER_MULTIPERSON:
             # multiperson_udp_sender.py does not take --seconds (it runs until stopped), so that one
@@ -572,12 +598,29 @@ def build_arg_parser():
     ap = argparse.ArgumentParser(description="F-20B sidecar supervisor/watchdog")
     ap.add_argument("--python", default=DEFAULT_PYTHON)
     ap.add_argument("--script", default=DEFAULT_SCRIPT)
-    ap.add_argument("--sender", default=None, choices=[SENDER_WHOLEBODY, SENDER_MULTIPERSON],
+    ap.add_argument("--sender", default=None,
+                     choices=[SENDER_WHOLEBODY, SENDER_MULTIPERSON, SENDER_VIDEO],
                      help="which sender --script names, and therefore which flags it is launched "
                           "with. Inferred from the script's basename when omitted.")
     ap.add_argument("--max-poses", type=int, default=3,
                      help="multi-person only: people posed per frame, forwarded to the sender. "
                           "Ignored for the single-person sender, which has no such flag.")
+    ap.add_argument("--video", default=None,
+                     help="F-49: the clip for video_udp_sender.py - a local path, a direct http(s) "
+                          "link to a video file, or a page yt-dlp can resolve. Required when the "
+                          "video sender is selected, ignored otherwise.")
+    ap.add_argument("--video-loop", type=int, default=0,
+                     help="F-49: replays of the clip; 0 loops forever")
+    ap.add_argument("--video-assume-measured", action="store_true",
+                     help="F-49: label every joint's depth MEASURED on the wire (label only)")
+    ap.add_argument("--video-subject-height", type=float, default=1.70,
+                     help="F-49: assumed subject height, metres; sets the estimated hip depth")
+    ap.add_argument("--video-hfov", type=float, default=60.0,
+                     help="F-49: assumed horizontal field of view of the clip's camera, degrees")
+    ap.add_argument("--video-depth-range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                     help="F-49: clamp the estimated hip depth to this band, metres")
+    ap.add_argument("--video-cache-dir", default=None,
+                     help="F-49: where downloaded clips are kept (default: the OS temp folder)")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8899)

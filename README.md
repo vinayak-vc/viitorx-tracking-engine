@@ -249,6 +249,29 @@ different environments and only the venv has DirectML. See `docs/ai_handoff.md` 
 .venv\Scripts\python.exe tools\deployment20b_fake_sidecar.py
 ```
 
+### Video as the source — the same wire, from a file or a link (F-49)
+
+`tools/video/video_udp_sender.py` runs the production single-person pipeline (RTMW3D, the production
+landmark builders, P1-1 states) on a video and sends the **same datagram** the OAK-D senders send, so
+Unity — every scene, the skeleton show, the VRM avatar — runs unchanged. Unity launches it through the
+supervisor when `AppBootstrap > Video Test Source > Track From Video` is ticked; by hand:
+
+```bash
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video ../../video/SR7.mp4
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video https://example.com/clip.mp4
+```
+
+`--video` is a local path, a **direct** http(s) link to a video file (downloaded once into
+`--cache-dir`, default the OS temp folder), or a web page, which needs `yt-dlp` — **not installed in the
+venv**; snapshot `pip freeze` before installing it. Only `http`, `https` and existing files are accepted.
+
+What it is not: **no stereo** (every `src` flag is 0 unless `--assume-measured`, which relabels and moves
+nothing), **no crowd** (the detector runs on the OAK-D's VPU), hip depth **estimated** from
+`--subject-height` and `--hfov`, F-21 **off** unless `--ownership`. `--depth-range MIN MAX` clamps the
+estimate; leave it off to let a clip's framing exercise Unity's F-48 operating volume. `--loop 0` (default)
+replays forever; after a finite `--loop N` it idles rather than exiting, because the supervisor would
+restart it. It prints the supervisor's readiness markers and a heartbeat, including while downloading.
+
 ### Phase 1 — BlazePose on the OAK-D VPU (fallback)
 
 ```bash
@@ -275,6 +298,9 @@ after the ADR-065 reorganisation:
 
 .venv\Scripts\python.exe tools\diagnostics26_fidelity_analyze.py --selftest    # 28 passed
 .venv\Scripts\python.exe tools\diagnostics27_humanized_analyze.py --selftest   # 18 passed
+
+# F-49 video source: classification, atomic bounded download, supervisor command shape.
+.venv/Scripts/python.exe tests/test_video_source.py           # 46/46
 
 # Replay + adversarial against a real capture (needs a --log-dir from a session).
 .venv\Scripts\python.exe tools\diagnostics\evaluate_p1.py --dir <capture-dir>

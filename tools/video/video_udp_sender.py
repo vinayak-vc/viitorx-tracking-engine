@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""F-49 - THE VIDEO SENDER: run the REAL tracking pipeline on a video instead of the OAK-D feed.
+"""F-49 - THE VIDEO SENDER: run the REAL tracking pipeline on a video, a phone or a webcam instead of
+the OAK-D feed.
 
 WHY THIS EXISTS. Everything downstream of the sidecar - the pose buffer, the F-48 operating volume,
 the humanize layer, every experience scene, the skeleton show and the VRM avatar - only ever sees a UDP
-datagram. So "test this against a video" means producing the SAME datagram from a file, and letting
-Unity run completely unchanged. Unity launches this through the supervisor exactly as it launches the
-OAK-D senders (AppBootstrap -> "Video Test Source" fields), so the scene, the restart watchdog and the
-readiness contract are the production ones.
+datagram. So "test this against a video" means producing the SAME datagram from another source, and
+letting Unity run completely unchanged. Unity launches this through the supervisor exactly as it launches
+the OAK-D senders (AppBootstrap -> "Video Test Source" fields), so the scene, the restart watchdog and
+the readiness contract are the production ones.
 
-It is f23_video_to_unity.py grown into something Unity can own: a source that may be a URL, a loop that
-never ends, the supervisor's readiness markers, and a heartbeat that keeps talking while it downloads.
-f23 stays as the evidence tool it was; nothing here changes it.
+It is f23_video_to_unity.py grown into something Unity can own: a source that may be a URL, a webcam or a
+phone, a loop that never ends, the supervisor's readiness markers, and a heartbeat that keeps talking
+while it downloads or waits for a camera. f23 stays as the evidence tool it was; nothing here changes it.
 
 WHAT IS REAL
   * RTMW3D, the production model, at the production confidence gate, with the production crop loop
@@ -31,7 +32,8 @@ WHAT IS NOT, and the whole caveat
     F-48 operating volume says TOO CLOSE: a close-up clip legitimately reads near. Change
     --subject-height or --depth-range to move a clip in or out of the volume.
   * NO MULTI-PERSON. The crowd detector runs on the OAK-D's VPU and there is no host-side copy of it,
-    so a crowd scene fed from here sees a crowd of one. The single-person pipeline is what this is.
+    so a crowd scene fed from here sees a crowd of one. The single-person pipeline is what this is, and
+    with several people in frame its one crop hops between them.
   * F-21 OWNERSHIP IS OFF by default (--ownership to enable). A walking subject in a clip is exactly
     the case ADR-083 says F-21 mishandles, and a video has no second person to defend against.
 
@@ -40,9 +42,22 @@ SOURCES (--video)
   a direct http(s) link to a file     downloaded once into --cache-dir (.mp4 .webm .mov .mkv .avi .m4v)
   any other http(s) page              handed to yt-dlp, if one is installed (it is NOT in the venv by
                                       default; install it deliberately - see README)
-Only http, https and existing local files are accepted. A URL is never passed to a shell.
+  camera:N   (or a bare 0-9)          a webcam by index. A phone shows up here when an app such as
+                                      DroidCam, Iriun or Camo exposes it as a Windows webcam. Run
+                                      --list-cameras to see which indices open.
+  rtsp://...  stream:<url>            a LIVE stream: an RTSP camera, or a phone "IP camera" app serving
+  http://192.168.x.x:8080/video       MJPEG. An http link to a private/LAN address is read as a stream,
+                                      not a page. Credentials in a link are never printed.
+Only http, https, rtsp and existing local files are accepted. A URL is never passed to a shell.
+
+LIVE SOURCES (camera and stream) differ from a file in three ways, all deliberate: the newest frame is
+always the one processed (a reader thread drops what inference cannot keep up with, so latency cannot
+pile up behind a slow GPU), there is no pacing because the camera is the clock, and a lost stream is
+reopened with backoff instead of treated as "the clip ended".
 
     .venv\\Scripts\\python.exe tools/video/video_udp_sender.py --video ..\\..\\video\\SR7.mp4
+    .venv\\Scripts\\python.exe tools/video/video_udp_sender.py --video camera:0 --rotate 90
+    .venv\\Scripts\\python.exe tools/video/video_udp_sender.py --list-cameras
 """
 
 import os as _os
@@ -58,14 +73,17 @@ import evidence_paths as EV
 import argparse
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -96,39 +114,118 @@ MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 DOWNLOAD_TIMEOUT_SECONDS = 20
 
 #: The supervisor kills a child whose stdout stops growing for 10 s (--heartbeat-timeout), and it only
-#: calls the child READY once it has seen `frames=`. So a download, a model load and a long skip all
-#: have to keep printing; this is how often. Well inside the 10 s limit.
+#: calls the child READY once it has seen `frames=`. So a download, a model load, a long skip and a camera
+#: that has not delivered yet all have to keep printing; this is how often. Well inside the 10 s limit.
 HEARTBEAT_SECONDS = 2.0
+
+#: Highest camera index accepted or probed. Windows rarely exposes more than a handful.
+MAX_CAMERA_INDEX = 15
+
+#: Schemes a live stream may use. rtsp is what IP cameras speak; http(s) is what phone "IP camera" apps
+#: serve (MJPEG). Nothing else is handed to OpenCV's FFmpeg backend, which will happily open file: and
+#: others if asked.
+STREAM_SCHEMES = ("rtsp", "rtsps", "http", "https")
+
+#: Reconnect backoff for a live source that stops delivering, seconds. Same shape as the supervisor's.
+RECONNECT_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 5.0)
 
 USER_AGENT = "viitorx-video-sender/1.0"
 
+KIND_FILE = "file"
+KIND_DIRECT = "direct"
+KIND_PAGE = "page"
+KIND_CAMERA = "camera"
+KIND_STREAM = "stream"
+LIVE_KINDS = (KIND_CAMERA, KIND_STREAM)
+
 
 class SourceError(Exception):
-    """The --video argument cannot be turned into a playable local file."""
+    """The --video argument cannot be turned into something playable."""
+
+
+def redact(text):
+    """The same text with any user:password@ removed from every URL in it. Used for EVERYTHING printed,
+    because an IP camera link commonly carries its credentials and these logs get shared."""
+    return re.sub(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1***@", text or "")
+
+
+def _is_lan_host(host):
+    """True for a loopback, private or link-local address, or a .local name. A phone app serves its
+    stream from one of these, and no public web page does - which is the whole basis for reading
+    `http://192.168.1.5:8080/video` as a camera rather than as a page for yt-dlp."""
+    if not host:
+        return False
+    h = host.strip("[]").lower()
+    if h == "localhost" or h.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def parse_camera_index(text):
+    """The camera index named by `camera:N` or a bare integer, or None when `text` is neither."""
+    t = text.strip()
+    m = re.match(r"(?i)^(?:camera|cam):\s*(\d+)$", t)
+    if m is None and re.match(r"^\d{1,2}$", t):
+        m = re.match(r"^(\d{1,2})$", t)
+    if m is None:
+        return None
+    idx = int(m.group(1))
+    if idx > MAX_CAMERA_INDEX:
+        raise SourceError("camera index %d is out of range (0-%d)" % (idx, MAX_CAMERA_INDEX))
+    return idx
 
 
 def classify_source(spec):
-    """What kind of thing --video names: 'file', 'direct' (a link to a video file) or 'page'.
+    """What --video names: 'file', 'direct' (a link to a video file), 'page', 'camera' or 'stream'.
 
-    Raises SourceError for anything else - an empty string, a missing path, or a scheme that is not
-    http/https. Refusing `file:`, `ftp:` and friends here is deliberate: this value comes from an
-    Inspector field and ends up in a request or in a subprocess argument list, so it is validated
-    against an allowlist rather than trusted.
+    Raises SourceError for anything else - an empty string, a missing path, or a scheme that is not on
+    the allowlist. Refusing `file:`, `ftp:` and friends here is deliberate: this value comes from an
+    Inspector field and ends up in a request, a subprocess argument list or OpenCV's FFmpeg backend, so
+    it is validated against an allowlist rather than trusted.
     """
     text = (spec or "").strip().strip('"')
     if not text:
         raise SourceError("no video given")
+    # An existing file always wins, so a file that happens to be called "0" is still a file.
     if os.path.isfile(text):
-        return "file"
+        return KIND_FILE
+    if parse_camera_index(text) is not None:
+        return KIND_CAMERA
+    if text.lower().startswith("stream:"):
+        inner = text[len("stream:"):].strip()
+        parsed = urllib.parse.urlparse(inner)
+        if parsed.scheme.lower() not in STREAM_SCHEMES or not parsed.netloc:
+            raise SourceError("stream: needs an rtsp:// or http(s):// link, got '%s'" % redact(inner))
+        return KIND_STREAM
     parsed = urllib.parse.urlparse(text)
-    if parsed.scheme in ("http", "https") and parsed.netloc:
+    scheme = parsed.scheme.lower()
+    if scheme in ("rtsp", "rtsps") and parsed.netloc:
+        return KIND_STREAM
+    if scheme in ("http", "https") and parsed.netloc:
         ext = os.path.splitext(urllib.parse.unquote(parsed.path))[1].lower()
-        return "direct" if ext in VIDEO_EXTENSIONS else "page"
-    if parsed.scheme and len(parsed.scheme) > 1:
+        if ext in VIDEO_EXTENSIONS:
+            return KIND_DIRECT
+        if _is_lan_host(parsed.hostname):
+            return KIND_STREAM
+        return KIND_PAGE
+    if scheme and len(scheme) > 1:
         # A one-letter "scheme" is a Windows drive ("C:\\..."), which fell through isfile() because the
         # file does not exist - that is a missing file, not a forbidden URL, and should say so.
-        raise SourceError("only http(s) links and local files are accepted, not '%s:'" % parsed.scheme)
+        raise SourceError("only http(s), rtsp links, camera:N and existing local files are accepted, "
+                          "not '%s:'" % scheme)
     raise SourceError("file not found: %s" % text)
+
+
+def stream_url(spec):
+    """The URL OpenCV should open for a KIND_STREAM spec."""
+    text = spec.strip().strip('"')
+    if text.lower().startswith("stream:"):
+        return text[len("stream:"):].strip()
+    return text
 
 
 def cache_path_for(url, cache_dir):
@@ -178,7 +275,7 @@ def download_direct(url, cache_dir):
     except (urllib.error.URLError, OSError) as e:
         if os.path.isfile(part):
             os.remove(part)
-        raise SourceError("download failed: %s" % e)
+        raise SourceError("download failed: %s" % redact(str(e)))
     except SourceError:
         if os.path.isfile(part):
             os.remove(part)
@@ -203,8 +300,9 @@ def download_page(url, cache_dir):
     base = find_ytdlp()
     if base is None:
         raise SourceError("this link is a web page, not a video file, and yt-dlp is not installed. "
-                          "Use a direct .mp4/.webm link or a local path, or install yt-dlp into "
-                          "python-sidecar~/.venv (snapshot `pip freeze` first).")
+                          "Use a direct .mp4/.webm link or a local path, install yt-dlp into "
+                          "python-sidecar~/.venv (snapshot `pip freeze` first), or - if this is a phone "
+                          "or IP camera - use camera:N or stream:<url>.")
     os.makedirs(cache_dir, exist_ok=True)
     cmd = base + ["--no-playlist", "--max-filesize", "2G",
                   "-f", "best[height<=720][ext=mp4]/best[height<=720]/best",
@@ -220,22 +318,168 @@ def download_page(url, cache_dir):
         if line:
             last = line
             # Prefixed with the marker so the supervisor sees growth AND counts it as a frames= line.
-            print("[vid] frames=0 sent=0 yt-dlp: %s" % line, flush=True)
+            print("[vid] frames=0 sent=0 yt-dlp: %s" % redact(line), flush=True)
     rc = proc.wait()
     if rc != 0 or not os.path.isfile(last):
         raise SourceError("yt-dlp failed (rc=%d)" % rc)
     return last
 
 
-def resolve_source(spec, cache_dir):
-    """The playable local path for --video."""
-    kind = classify_source(spec)
-    text = spec.strip().strip('"')
-    if kind == "file":
-        return text
-    if kind == "direct":
-        return download_direct(text, cache_dir)
-    return download_page(text, cache_dir)
+# ---- live sources -----------------------------------------------------------------------------------
+
+def open_camera(index, width, height, fps):
+    """Open a webcam by index, trying the Windows backends in the order that works for phones-as-webcams.
+
+    DirectShow first: it opens quickly and honours a requested size and MJPG, which is what lets a
+    webcam app deliver 30 fps at 720p instead of a slow raw stream. Media Foundation and then OpenCV's
+    own default follow. A backend that cannot open a device by index can raise, not just return False
+    (a virtual camera driver does), so each attempt is guarded. Returns an opened capture or None.
+    """
+    for backend in (getattr(cv2, "CAP_DSHOW", 0), getattr(cv2, "CAP_MSMF", 0), 0):
+        try:
+            cap = cv2.VideoCapture(index, backend) if backend else cv2.VideoCapture(index)
+        except cv2.error:
+            continue
+        if cap is not None and cap.isOpened():
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                cap.set(cv2.CAP_PROP_FPS, fps)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except cv2.error:
+                pass
+            return cap
+        if cap is not None:
+            cap.release()
+    return None
+
+
+def open_stream(url):
+    """Open a live stream URL, or None. OpenCV's FFmpeg backend does the work; the scheme allowlist has
+    already been applied by classify_source."""
+    try:
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    except cv2.error:
+        return None
+    if cap is not None and cap.isOpened():
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except cv2.error:
+            pass
+        return cap
+    if cap is not None:
+        cap.release()
+    return None
+
+
+class LatestFrameReader:
+    """Pulls frames from a live source on its own thread and hands the consumer only the NEWEST.
+
+    WHY. A camera or a stream produces frames at its own rate and does not wait. If the consumer
+    (RTMW3D at ~30 ms a frame) reads them in order from OpenCV's queue, any moment it runs slower than
+    the source adds a frame of lag that never drains: a phone that is 100 ms behind at the start is 2 s
+    behind five minutes later. Reading on a thread and keeping only the latest bounds the lag to one
+    frame, and counts what was dropped so that is visible rather than silent.
+
+    It also owns RECONNECTION: a source that stops delivering is released and reopened with backoff,
+    forever, because a phone that drops off Wi-Fi comes back and nothing should need restarting.
+
+    `opener` is a zero-argument callable returning an opened capture (anything with read() and
+    release()) or None. Taking a callable rather than a URL is what lets this be tested without a
+    camera.
+    """
+
+    def __init__(self, opener, name="source", clock=time.time, sleep=time.sleep):
+        self._opener = opener
+        self.name = name
+        self._clock = clock
+        self._sleep = sleep
+        self._cond = threading.Condition()
+        self._frame = None
+        self._stamp = 0.0
+        self._counter = 0
+        self._consumed = 0
+        self._stop = False
+        self._thread = None
+        self.frames_read = 0
+        self.dropped = 0
+        self.reconnects = 0
+        self.connected = False
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="reader-" + self.name, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        with self._cond:
+            self._stop = True
+            self._cond.notify_all()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+
+    def _run(self):
+        cap = None
+        failures = 0
+        while True:
+            with self._cond:
+                if self._stop:
+                    break
+            if cap is None:
+                cap = self._opener()
+                if cap is None:
+                    self.connected = False
+                    wait = RECONNECT_BACKOFF_SECONDS[min(failures, len(RECONNECT_BACKOFF_SECONDS) - 1)]
+                    failures += 1
+                    self._sleep(wait)
+                    continue
+                if failures > 0:
+                    self.reconnects += 1
+                self.connected = True
+                failures = 0
+            try:
+                ok, frame = cap.read()
+            except cv2.error:
+                ok, frame = False, None
+            if not ok or frame is None:
+                try:
+                    cap.release()
+                except cv2.error:
+                    pass
+                cap = None
+                self.connected = False
+                failures += 1
+                self._sleep(RECONNECT_BACKOFF_SECONDS[min(failures - 1, len(RECONNECT_BACKOFF_SECONDS) - 1)])
+                continue
+            with self._cond:
+                self._frame = frame
+                self._stamp = self._clock()
+                self._counter += 1
+                self.frames_read += 1
+                self._cond.notify_all()
+        if cap is not None:
+            try:
+                cap.release()
+            except cv2.error:
+                pass
+
+    def read(self, timeout):
+        """(frame, grab_time) for the newest frame not yet returned, or (None, 0.0) after `timeout`
+        seconds with nothing new. Frames that arrived and were overwritten before this call are counted
+        in `dropped`."""
+        deadline = self._clock() + timeout
+        with self._cond:
+            while self._counter == self._consumed and not self._stop:
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    return None, 0.0
+                self._cond.wait(remaining)
+            if self._counter == self._consumed:
+                return None, 0.0
+            self.dropped += self._counter - self._consumed - 1
+            self._consumed = self._counter
+            return self._frame, self._stamp
 
 
 def estimate_hip_depth(uv, conf, conf_gate, subject_height_m, fy, depth_range):
@@ -252,30 +496,75 @@ def estimate_hip_depth(uv, conf, conf_gate, subject_height_m, fy, depth_range):
     return min(max(hip_z, lo), hi)
 
 
+def orient_frame(frame, rotate_degrees, flip_horizontal):
+    """Rotate (0/90/180/270, clockwise) and optionally mirror a frame BEFORE inference.
+
+    Phone apps deliver a portrait phone as a sideways frame, and a front camera as a mirror image that
+    swaps the subject's left and right. Both have to be undone in the image, because the model reads
+    the image: correcting afterwards would leave it looking at a person lying down.
+    """
+    if rotate_degrees == 90:
+        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    elif rotate_degrees == 180:
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
+    elif rotate_degrees == 270:
+        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    if flip_horizontal:
+        frame = cv2.flip(frame, 1)
+    return frame
+
+
+def list_cameras():
+    """Print which camera indices open and at what size. For picking the index of a phone webcam."""
+    found = 0
+    for idx in range(MAX_CAMERA_INDEX + 1):
+        cap = open_camera(idx, 1280, 720, 30)
+        if cap is None:
+            continue
+        ok, frame = cap.read()
+        h, w = (frame.shape[0], frame.shape[1]) if ok and frame is not None else (0, 0)
+        cap.release()
+        print("camera:%d  opens, %s" % (idx, ("%dx%d" % (w, h)) if ok else "but delivered no frame"))
+        found += 1
+    if found == 0:
+        print("no camera opened. Is the phone app running and exposing a webcam?")
+    return 0 if found else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="F-49 video-driven sidecar")
-    ap.add_argument("--video", required=True,
-                    help="a local path, a direct http(s) link to a video file, or a page yt-dlp can "
-                         "resolve")
+    ap.add_argument("--video", default=None,
+                    help="a local path, a direct http(s) video link, a page yt-dlp can resolve, "
+                         "camera:N, or a live rtsp:// / LAN http stream")
+    ap.add_argument("--list-cameras", action="store_true",
+                    help="print which camera indices open, then exit")
     ap.add_argument("--model", default=EV.DEFAULT_MODEL)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8899)
     ap.add_argument("--conf", type=float, default=0.3)
     ap.add_argument("--hfov", type=float, default=60.0,
-                    help="assumed horizontal FOV of the source camera, degrees. Unknown for an "
-                         "arbitrary clip; only scales the pose.")
+                    help="assumed horizontal FOV of the source camera, degrees (measured AFTER any "
+                         "rotation). A phone's main camera is roughly 70-80; unknown for a clip.")
     ap.add_argument("--subject-height", type=float, default=1.70,
                     help="assumed subject height (m). Sets the estimated hip depth, and therefore "
                          "whether the F-48 operating volume calls the clip too close.")
     ap.add_argument("--depth-range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                     help="clamp the estimated hip depth to this band, metres. Off by default so the "
                          "operating volume can be exercised by a clip's own framing.")
+    ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
+                    help="rotate each frame clockwise before inference (a portrait phone)")
+    ap.add_argument("--flip", action=argparse.BooleanOptionalAction, default=False,
+                    help="mirror each frame horizontally before inference (a front camera)")
+    ap.add_argument("--camera-size", type=int, nargs=2, default=(1280, 720), metavar=("W", "H"),
+                    help="requested webcam resolution. Ignored by files and streams.")
+    ap.add_argument("--camera-fps", type=int, default=30, help="requested webcam frame rate")
     ap.add_argument("--loop", type=int, default=0,
-                    help="replays of the clip; 0 (default) loops forever. After the last replay the "
-                         "sender stays alive and silent instead of exiting, because the supervisor "
-                         "would otherwise restart it and replay the clip forever anyway.")
+                    help="FILES: replays of the clip; 0 (default) loops forever. After the last replay "
+                         "the sender stays alive and silent instead of exiting, because the supervisor "
+                         "would otherwise restart it and replay the clip forever anyway. Ignored by "
+                         "cameras and streams.")
     ap.add_argument("--realtime", action=argparse.BooleanOptionalAction, default=True,
-                    help="pace to the clip's own frame rate (default). --no-realtime runs flat out.")
+                    help="FILES: pace to the clip's own frame rate (default). --no-realtime runs flat out.")
     ap.add_argument("--ownership", action=argparse.BooleanOptionalAction, default=False,
                     help="run F-21 target ownership. OFF: a video has one subject, and ADR-083 "
                          "documents F-21 withholding frames from a subject who walks.")
@@ -294,40 +583,63 @@ def main():
                     help="production's own default is OFF; see f23_video_to_unity.py")
     a = ap.parse_args()
 
+    if a.list_cameras:
+        return list_cameras()
+    if not a.video:
+        ap.error("--video is required (or --list-cameras)")
+
     print("[vid] F-49 video sender", flush=True)
     print("[vid]   producer session id = %s  (F-20A: new on every process start)" % SESSION_ID,
           flush=True)
     print("[vid]   interpreter : %s" % sys.executable, flush=True)
 
-    # Resolve FIRST and say so: a download can take longer than the supervisor's patience, and it
-    # keeps printing for exactly that reason (HEARTBEAT_SECONDS).
+    # Classify and, for a file, resolve FIRST and say so: a download can take longer than the
+    # supervisor's patience, and it keeps printing for exactly that reason (HEARTBEAT_SECONDS).
     try:
-        path = resolve_source(a.video, a.cache_dir)
+        kind = classify_source(a.video)
+        path = None
+        if kind in (KIND_FILE, KIND_DIRECT, KIND_PAGE):
+            text = a.video.strip().strip('"')
+            path = text if kind == KIND_FILE else (
+                download_direct(text, a.cache_dir) if kind == KIND_DIRECT
+                else download_page(text, a.cache_dir))
     except SourceError as e:
-        print("[vid] ERROR cannot use --video %r: %s" % (a.video, e), flush=True)
+        print("[vid] ERROR cannot use --video %r: %s" % (redact(a.video), e), flush=True)
         return 2
+    live = kind in LIVE_KINDS
 
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        print("[vid] ERROR OpenCV cannot open %s (unsupported codec, or not a video)" % path, flush=True)
-        return 2
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    if src_fps < 1.0 or src_fps > 240.0 or math.isnan(src_fps):
-        src_fps = 30.0
-    fx = fy = 0.5 * w / math.tan(math.radians(a.hfov) * 0.5)
-    intr = (fx, fy, w * 0.5, h * 0.5)
-    print("[vid]   source      : %s" % path, flush=True)
-    print("[vid]   video       : %dx%d @ %.2f fps   assumed fx=fy=%.1f (hfov %.0f deg)"
-          % (w, h, src_fps, fx, a.hfov), flush=True)
+    reader = None
+    cap = None
+    if live:
+        if kind == KIND_CAMERA:
+            cam_index = parse_camera_index(a.video)
+            cam_w, cam_h = a.camera_size
+            describe = "camera %d (requested %dx%d @ %d)" % (cam_index, cam_w, cam_h, a.camera_fps)
+            opener = lambda: open_camera(cam_index, cam_w, cam_h, a.camera_fps)  # noqa: E731
+        else:
+            url = stream_url(a.video)
+            describe = "stream %s" % redact(url)
+            opener = lambda: open_stream(url)  # noqa: E731
+        print("[vid]   source      : %s  (LIVE: newest frame only, reconnects on loss)" % describe,
+              flush=True)
+        reader = LatestFrameReader(opener, name=kind).start()
+    else:
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            print("[vid] ERROR OpenCV cannot open %s (unsupported codec, or not a video)" % path,
+                  flush=True)
+            return 2
+        print("[vid]   source      : %s" % path, flush=True)
+    print("[vid]   orientation : rotate %d deg, %s" % (a.rotate, "mirrored" if a.flip else "not mirrored"),
+          flush=True)
     print("[vid]   depth       : estimated from subject height %.2f m%s   src flags: %s"
           % (a.subject_height,
              (" clamped to %.2f-%.2f m" % tuple(a.depth_range)) if a.depth_range else "",
              "ALL 1 (--assume-measured, a label)" if a.assume_measured else "all 0 (no stereo)"),
           flush=True)
-    print("[vid]   ownership   : %s   loop: %s"
-          % ("ON" if a.ownership else "OFF", "forever" if a.loop <= 0 else "%d" % a.loop), flush=True)
+    print("[vid]   ownership   : %s   %s"
+          % ("ON" if a.ownership else "OFF",
+             "live" if live else ("loop: forever" if a.loop <= 0 else "loop: %d" % a.loop)), flush=True)
 
     # Load the model while still printing, so the supervisor's heartbeat sees the load as progress.
     print("[vid] frames=0 sent=0 loading RTMW3D ...", flush=True)
@@ -340,16 +652,6 @@ def main():
     model = R.RTMW3D(a.model)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def fresh_state():
-        """Everything that carries temporal memory, rebuilt at each replay so the clip's end does
-        not smear into its start."""
-        return {
-            "zfilt": [smoothing.OneEuro(freq=src_fps, min_cutoff=0.5, beta=0.4) for _ in range(133)],
-            "skel": JT.SkeletonTracker(),
-            "own": TO.TargetOwnership(TO.OwnershipConfig()) if a.ownership else None,
-            "bbox": R.center_bbox(w, h),
-        }
-
     measured = np.zeros(133, dtype=bool)
     xyz_cam = np.zeros((133, 3), dtype=np.float32)
     xyz_cam_track = np.zeros((133, 3), dtype=np.float32)
@@ -360,130 +662,179 @@ def main():
     t_run = time.time()
     last_beat = 0.0
     replay = 0
+    # Set from the FIRST frame, after orientation: a rotated phone swaps width and height, and the
+    # focal length derives from the width, so none of this can be known before a frame exists.
+    ctx = {"w": 0, "h": 0, "fx": 0.0, "fy": 0.0, "intr": None, "src_fps": 30.0, "state": None}
 
     def heartbeat(note=""):
         el = max(1e-6, time.time() - t_run)
-        print("[vid] frames=%d sent=%d skipped=%d fps~%.1f replay=%d %s"
-              % (frames, sent, skipped, sent / el, replay, note), flush=True)
+        extra = ""
+        if reader is not None:
+            extra = " live=%s dropped=%d reconnects=%d" % ("Y" if reader.connected else "n",
+                                                           reader.dropped, reader.reconnects)
+        print("[vid] frames=%d sent=%d skipped=%d fps~%.1f replay=%d%s %s"
+              % (frames, sent, skipped, sent / el, replay, extra, note), flush=True)
+
+    def fresh_state():
+        """Everything that carries temporal memory, rebuilt at each replay so the clip's end does
+        not smear into its start."""
+        return {
+            "zfilt": [smoothing.OneEuro(freq=ctx["src_fps"], min_cutoff=0.5, beta=0.4) for _ in range(133)],
+            "skel": JT.SkeletonTracker(),
+            "own": TO.TargetOwnership(TO.OwnershipConfig()) if a.ownership else None,
+            "bbox": R.center_bbox(ctx["w"], ctx["h"]),
+        }
 
     heartbeat("ready")
-    state = fresh_state()
     t_loop = time.time()
     loop_frame = 0
 
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            if loop_frame == 0:
-                # Opened but yielded nothing: a decode failure from the first frame. Looping on that
-                # would spin the CPU forever printing nothing useful.
-                print("[vid] ERROR %s opened but produced no frames" % path, flush=True)
-                return 2
-            replay += 1
-            if a.loop > 0 and replay >= a.loop:
-                break
-            cap.release()
-            cap = cv2.VideoCapture(path)
-            if not cap.isOpened():
-                print("[vid] ERROR could not reopen %s for replay" % path, flush=True)
-                return 2
-            state = fresh_state()
-            t_loop = time.time()
-            loop_frame = 0
-            continue
+    try:
+        while True:
+            t_grab = None
+            if live:
+                frame, t_grab = reader.read(HEARTBEAT_SECONDS)
+                if frame is None:
+                    # Nothing new within the heartbeat interval: say so rather than go quiet, or the
+                    # supervisor reads a camera that has not delivered as a hung process.
+                    heartbeat("waiting for frames" if reader.frames_read == 0 else "no new frame")
+                    last_beat = time.time()
+                    continue
+            else:
+                ok, frame = cap.read()
+                if not ok:
+                    if loop_frame == 0:
+                        # Opened but yielded nothing: a decode failure from the first frame. Looping on
+                        # that would spin the CPU forever printing nothing useful.
+                        print("[vid] ERROR %s opened but produced no frames" % path, flush=True)
+                        return 2
+                    replay += 1
+                    if a.loop > 0 and replay >= a.loop:
+                        break
+                    cap.release()
+                    cap = cv2.VideoCapture(path)
+                    if not cap.isOpened():
+                        print("[vid] ERROR could not reopen %s for replay" % path, flush=True)
+                        return 2
+                    ctx["state"] = fresh_state() if ctx["w"] else None
+                    t_loop = time.time()
+                    loop_frame = 0
+                    continue
 
-        frames += 1
-        loop_frame += 1
-        if a.realtime:
-            # Pace EVERY frame to the clip's own clock, including the ones that will be skipped. A clip
-            # that opens on an empty room otherwise burns through its first seconds at inference speed,
-            # then arrives at the subject with the wall clock far behind the video and plays flat out
-            # until it catches up - which is not a fair test of anything a camera would deliver. The
-            # wait comes BEFORE inference, so a frame is never stale by the time it is posed.
-            due = t_loop + (loop_frame - 1) / src_fps
-            wait = due - time.time()
-            if wait > 0:
-                time.sleep(min(wait, 0.25))
-        t_frame = time.time()
-        now = t_frame
-        if now - last_beat >= HEARTBEAT_SECONDS:
-            last_beat = now
-            heartbeat()
+            frame = orient_frame(frame, a.rotate, a.flip)
+            if ctx["w"] == 0:
+                ctx["h"], ctx["w"] = frame.shape[0], frame.shape[1]
+                fps = (cap.get(cv2.CAP_PROP_FPS) if cap is not None else 0.0) or 30.0
+                ctx["src_fps"] = 30.0 if (fps < 1.0 or fps > 240.0 or math.isnan(fps)) else fps
+                ctx["fx"] = ctx["fy"] = 0.5 * ctx["w"] / math.tan(math.radians(a.hfov) * 0.5)
+                ctx["intr"] = (ctx["fx"], ctx["fy"], ctx["w"] * 0.5, ctx["h"] * 0.5)
+                ctx["state"] = fresh_state()
+                print("[vid]   frame       : %dx%d @ %.2f fps   assumed fx=fy=%.1f (hfov %.0f deg)"
+                      % (ctx["w"], ctx["h"], ctx["src_fps"], ctx["fx"], a.hfov), flush=True)
+            w, h, fy, fx, intr = ctx["w"], ctx["h"], ctx["fy"], ctx["fx"], ctx["intr"]
+            src_fps = ctx["src_fps"]
+            state = ctx["state"]
 
-        uv, zrel, conf = model.infer(frame, state["bbox"])
-        # production M15 crop refinement, same blend as the live sender
-        refined = R.bbox_from_keypoints(uv, conf, w, h, thr=a.conf)
-        body_conf = float(np.mean([conf[i] for i in R.COCO17_TO_JOINTID]))
-        if refined is not None and body_conf >= a.conf:
-            state["bbox"] = tuple(0.7 * np.array(state["bbox"]) + 0.3 * np.array(refined))
-        else:
-            state["bbox"] = R.center_bbox(w, h)
+            frames += 1
+            loop_frame += 1
+            if not live and a.realtime:
+                # Pace EVERY file frame to the clip's own clock, including the ones that will be
+                # skipped. A clip that opens on an empty room otherwise burns through its first seconds
+                # at inference speed, then arrives at the subject with the wall clock far behind the
+                # video and plays flat out until it catches up. The wait comes BEFORE inference, so a
+                # frame is never stale by the time it is posed. A live source is its own clock.
+                due = t_loop + (loop_frame - 1) / src_fps
+                wait = due - time.time()
+                if wait > 0:
+                    time.sleep(min(wait, 0.25))
+            # `lat` for a live source starts when the frame was GRABBED, so the time it waited for the
+            # model is counted; for a file there is no capture time and it starts at decode.
+            t_frame = t_grab if t_grab is not None else time.time()
+            now = time.time()
+            if now - last_beat >= HEARTBEAT_SECONDS:
+                last_beat = now
+                heartbeat()
 
-        if conf[11] < a.conf or conf[12] < a.conf:
-            skipped += 1
-            continue
-        hip_z = estimate_hip_depth(uv, conf, a.conf, a.subject_height, fy, a.depth_range)
-        if a.smooth_zrel:
-            zrel = np.array([state["zfilt"][i].filter(float(zrel[i])) for i in range(len(zrel))],
-                            dtype=np.float32)
-        zrel_hip = 0.5 * (float(zrel[11]) + float(zrel[12]))
-        hip_uv = 0.5 * (uv[11] + uv[12])
-        mid_hip = np.array([(hip_uv[0] - intr[2]) * hip_z / fx,
-                            (hip_uv[1] - intr[3]) * hip_z / fy, hip_z], dtype=np.float32)
+            uv, zrel, conf = model.infer(frame, state["bbox"])
+            # production M15 crop refinement, same blend as the live sender
+            refined = R.bbox_from_keypoints(uv, conf, w, h, thr=a.conf)
+            body_conf = float(np.mean([conf[i] for i in R.COCO17_TO_JOINTID]))
+            if refined is not None and body_conf >= a.conf:
+                state["bbox"] = tuple(0.7 * np.array(state["bbox"]) + 0.3 * np.array(refined))
+            else:
+                state["bbox"] = R.center_bbox(w, h)
 
-        # P1-1 per-joint states, for the TRUST HUD. States only; geometry is never written back, so
-        # this cannot turn an unmeasured joint into a "measured" one (see f23's long note).
-        pos_in, cnf_in, dv_in = {}, {}, {}
-        for j in state["skel"].indices:
-            p = W._fallback_point(j, uv, zrel, zrel_hip, mid_hip, hip_z, intr, True) + mid_hip
-            xyz_cam_track[j] = p
-            pos_in[j] = (float(p[0]), float(p[1]), float(p[2]))
-            cnf_in[j] = float(conf[j])
-            dv_in[j] = True
-        track_res = state["skel"].update(pos_in, cnf_in, now, depth_valid=dv_in, collect_events=False)
-
-        own_state = None
-        if state["own"] is not None:
-            raw_scale = None
-            if conf[5] >= a.conf and conf[6] >= a.conf:
-                sh = 0.5 * (xyz_cam_track[5] + xyz_cam_track[6])
-                raw_scale = float(np.linalg.norm(sh - mid_hip))
-            own_state, should_emit = state["own"].update(
-                TO.Observation(valid=True, pos=tuple(float(v) for v in mid_hip), conf=body_conf,
-                               scale=raw_scale), now)
-            for e in state["own"].drain_events():
-                print("[vid] TARGET %s state=%s target_id=%s%s" % (
-                    e["event"], e["state"], e.get("target_id"),
-                    (" reason=%s" % e["reason"]) if "reason" in e else ""), flush=True)
-            if not should_emit:
+            if conf[11] < a.conf or conf[12] < a.conf:
                 skipped += 1
                 continue
+            hip_z = estimate_hip_depth(uv, conf, a.conf, a.subject_height, fy, a.depth_range)
+            if a.smooth_zrel:
+                zrel = np.array([state["zfilt"][i].filter(float(zrel[i])) for i in range(len(zrel))],
+                                dtype=np.float32)
+            zrel_hip = 0.5 * (float(zrel[11]) + float(zrel[12]))
+            hip_uv = 0.5 * (uv[11] + uv[12])
+            mid_hip = np.array([(hip_uv[0] - intr[2]) * hip_z / fx,
+                                (hip_uv[1] - intr[3]) * hip_z / fy, hip_z], dtype=np.float32)
 
-        lm, src = W.build_body_landmarks(uv, xyz_cam, measured, conf, zrel, zrel_hip, mid_hip, hip_z,
-                                         intr, a.conf, flatten_trunk=a.flatten_trunk, use_zrel=True)
-        lh = W.build_hand(uv, xyz_cam, measured, conf, zrel, zrel_hip, mid_hip, hip_z, intr, 91,
-                          a.conf, use_zrel=True)
-        rh = W.build_hand(uv, xyz_cam, measured, conf, zrel, zrel_hip, mid_hip, hip_z, intr, 112,
-                          a.conf, use_zrel=True)
-        seq += 1
-        msg = {"lm": lm,
-               "xyz": [round(float(mid_hip[0] * 1000.0 * a.sway_gain), 1),
-                       round(float(mid_hip[1] * 1000.0 * a.sway_gain), 1),
-                       round(float(mid_hip[2] * 1000.0), 1)],
-               "src": src_all_measured if a.assume_measured else src,
-               "seq": seq, "sid": SESSION_ID, "t": round(time.time(), 4),
-               "st": W.build_joint_states(track_res),
-               "lat": round((time.time() - t_frame) * 1000.0, 1)}
-        if own_state is not None:
-            msg["own"] = own_state
-        if lh is not None:
-            msg["lh"] = lh
-        if rh is not None:
-            msg["rh"] = rh
-        sock.sendto(json.dumps(msg).encode("utf-8"), (a.host, a.port))
-        sent += 1
+            # P1-1 per-joint states, for the TRUST HUD. States only; geometry is never written back, so
+            # this cannot turn an unmeasured joint into a "measured" one (see f23's long note).
+            pos_in, cnf_in, dv_in = {}, {}, {}
+            for j in state["skel"].indices:
+                p = W._fallback_point(j, uv, zrel, zrel_hip, mid_hip, hip_z, intr, True) + mid_hip
+                xyz_cam_track[j] = p
+                pos_in[j] = (float(p[0]), float(p[1]), float(p[2]))
+                cnf_in[j] = float(conf[j])
+                dv_in[j] = True
+            track_res = state["skel"].update(pos_in, cnf_in, now, depth_valid=dv_in,
+                                             collect_events=False)
 
-    cap.release()
+            own_state = None
+            if state["own"] is not None:
+                raw_scale = None
+                if conf[5] >= a.conf and conf[6] >= a.conf:
+                    sh = 0.5 * (xyz_cam_track[5] + xyz_cam_track[6])
+                    raw_scale = float(np.linalg.norm(sh - mid_hip))
+                own_state, should_emit = state["own"].update(
+                    TO.Observation(valid=True, pos=tuple(float(v) for v in mid_hip), conf=body_conf,
+                                   scale=raw_scale), now)
+                for e in state["own"].drain_events():
+                    print("[vid] TARGET %s state=%s target_id=%s%s" % (
+                        e["event"], e["state"], e.get("target_id"),
+                        (" reason=%s" % e["reason"]) if "reason" in e else ""), flush=True)
+                if not should_emit:
+                    skipped += 1
+                    continue
+
+            lm, src = W.build_body_landmarks(uv, xyz_cam, measured, conf, zrel, zrel_hip, mid_hip,
+                                             hip_z, intr, a.conf, flatten_trunk=a.flatten_trunk,
+                                             use_zrel=True)
+            lh = W.build_hand(uv, xyz_cam, measured, conf, zrel, zrel_hip, mid_hip, hip_z, intr, 91,
+                              a.conf, use_zrel=True)
+            rh = W.build_hand(uv, xyz_cam, measured, conf, zrel, zrel_hip, mid_hip, hip_z, intr, 112,
+                              a.conf, use_zrel=True)
+            seq += 1
+            msg = {"lm": lm,
+                   "xyz": [round(float(mid_hip[0] * 1000.0 * a.sway_gain), 1),
+                           round(float(mid_hip[1] * 1000.0 * a.sway_gain), 1),
+                           round(float(mid_hip[2] * 1000.0), 1)],
+                   "src": src_all_measured if a.assume_measured else src,
+                   "seq": seq, "sid": SESSION_ID, "t": round(time.time(), 4),
+                   "st": W.build_joint_states(track_res),
+                   "lat": round((time.time() - t_frame) * 1000.0, 1)}
+            if own_state is not None:
+                msg["own"] = own_state
+            if lh is not None:
+                msg["lh"] = lh
+            if rh is not None:
+                msg["rh"] = rh
+            sock.sendto(json.dumps(msg).encode("utf-8"), (a.host, a.port))
+            sent += 1
+    finally:
+        if reader is not None:
+            reader.stop()
+
+    if cap is not None:
+        cap.release()
     heartbeat("video finished (%d replay%s); idle" % (replay, "" if replay == 1 else "s"))
     # Stay alive and quiet. Exiting would make the supervisor restart this and replay the clip, which
     # is the opposite of "play it N times". The heartbeat keeps the supervisor's watchdog satisfied.

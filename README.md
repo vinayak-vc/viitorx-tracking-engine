@@ -265,6 +265,12 @@ supervisor when `AppBootstrap > Video Test Source > Track From Video` is ticked;
 `--cache-dir`, default the OS temp folder), or a web page, which needs `yt-dlp` — **not installed in the
 venv**; snapshot `pip freeze` before installing it. Only `http`, `https` and existing files are accepted.
 
+A **phone or webcam** works too: `--video camera:0` (a phone shows up here when DroidCam / Iriun / Camo expose it as a
+Windows webcam; `--list-cameras` shows which indices open), or a phone "IP camera" app over Wi-Fi as
+`--video http://192.168.1.5:8080/video`, or `--video rtsp://host/stream`. Add `--rotate 90|180|270` for a sideways portrait
+phone and `--flip` for a front camera; both act on the image before the model. A live source is processed newest-frame-only
+(stale frames are dropped, never queued) and reconnects on loss. Credentials in a link are never printed.
+
 What it is not: **no stereo** (every `src` flag is 0 unless `--assume-measured`, which relabels and moves
 nothing), **no crowd** (the detector runs on the OAK-D's VPU), hip depth **estimated** from
 `--subject-height` and `--hfov`, F-21 **off** unless `--ownership`. `--depth-range MIN MAX` clamps the
@@ -300,7 +306,7 @@ after the ADR-065 reorganisation:
 .venv\Scripts\python.exe tools\diagnostics27_humanized_analyze.py --selftest   # 18 passed
 
 # F-49 video source: classification, atomic bounded download, supervisor command shape.
-.venv/Scripts/python.exe tests/test_video_source.py           # 46/46
+.venv/Scripts/python.exe tests/test_video_source.py           # 95/95
 
 # Replay + adversarial against a real capture (needs a --log-dir from a session).
 .venv\Scripts\python.exe tools\diagnostics\evaluate_p1.py --dir <capture-dir>

@@ -45,6 +45,7 @@ import argparse
 import io
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -108,6 +109,16 @@ BACKOFF_SCHEDULE_SECONDS = [1.0, 2.0, 5.0, 10.0, 30.0]
 
 SID_MARKER = "producer session id = "
 FRAME_MARKER = "frames="
+
+
+_URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@")
+
+
+def redact(text):
+    """`text` with any user:password@ inside a URL removed. A phone/IP-camera stream link commonly
+    carries its credentials, and the supervisor log and event file are the things people attach to a
+    bug report."""
+    return _URL_CREDENTIALS.sub(r"\1***@", text)
 
 
 def _now_str():
@@ -315,6 +326,13 @@ class Supervisor(object):
             if self.args.video_depth_range:
                 cmd += ["--depth-range", str(self.args.video_depth_range[0]),
                         str(self.args.video_depth_range[1])]
+            if self.args.video_rotate:
+                cmd += ["--rotate", str(self.args.video_rotate)]
+            if self.args.video_flip:
+                cmd += ["--flip"]
+            if self.args.video_camera_size:
+                cmd += ["--camera-size", str(self.args.video_camera_size[0]),
+                        str(self.args.video_camera_size[1])]
             if self.args.video_assume_measured:
                 cmd += ["--assume-measured"]
             if self.args.video_cache_dir:
@@ -384,14 +402,16 @@ class Supervisor(object):
         self._stdout_fh = io.open(log_path, "w", encoding="utf-8")
         self._stdout_log_path = log_path
         cmd = self.build_command()
-        self.log("SIDECAR CMD %s" % " ".join(cmd))
+        # A stream link commonly carries user:password@ ; this log is shared, so it is redacted.
+        self.log("SIDECAR CMD %s" % redact(" ".join(cmd)))
         self.state = STARTING
         self.proc = subprocess.Popen(cmd, cwd=HERE, stdout=self._stdout_fh,
                                       stderr=subprocess.STDOUT)
         self.pid = self.proc.pid
         self.start_time = time.time()
         self.log("SIDECAR START pid=%d run=%d" % (self.pid, run_index))
-        self.event("SidecarStart", pid=self.pid, run=run_index, cmd=cmd)
+        self.event("SidecarStart", pid=self.pid, run=run_index,
+                   cmd=[redact(c) for c in cmd])
         self.write_state()
 
     def _mark_ready(self):
@@ -619,6 +639,12 @@ def build_arg_parser():
                      help="F-49: assumed horizontal field of view of the clip's camera, degrees")
     ap.add_argument("--video-depth-range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                      help="F-49: clamp the estimated hip depth to this band, metres")
+    ap.add_argument("--video-rotate", type=int, default=0, choices=[0, 90, 180, 270],
+                     help="F-49: rotate each frame clockwise before inference (a portrait phone)")
+    ap.add_argument("--video-flip", action="store_true",
+                     help="F-49: mirror each frame horizontally before inference (a front camera)")
+    ap.add_argument("--video-camera-size", type=int, nargs=2, default=None, metavar=("W", "H"),
+                     help="F-49: requested webcam resolution; ignored by files and streams")
     ap.add_argument("--video-cache-dir", default=None,
                      help="F-49: where downloaded clips are kept (default: the OS temp folder)")
     ap.add_argument("--model", default=DEFAULT_MODEL)

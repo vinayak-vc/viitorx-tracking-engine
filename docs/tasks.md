@@ -35,6 +35,14 @@ Detector alone 8-12 ms. On the one-person clip `video.webm` the multi path repro
 Through the sender a FILE runs at ~17 fps because decoding that 1080x1920 webm costs ~13 ms (spikes to 97 ms) on the same thread; a
 live source decodes on its own reader thread.
 
+**F-52 follow-up (first real two-person clip, 4K, live in Unity):** `LoadTicker` (the heartbeat is repeated while a blocking model load runs; the supervisor killed a silent child
+at 10 s and the FP32 load takes 13.8 s), `PrefetchCapture` / `--prefetch` (a big file is decoded on its own thread: 13.4 -> 21.8 fps on 4K), and Unity now launches the FP16 model. Offline both
+people were posed on 1931/1934 frames with exactly 2 ids. `tests/test_video_source.py` **129/129**. Full record in the Unity repo, `docs/tasks.md` "F-52 FOLLOW-UP".
+
+**F-52 follow-up 2 (the skeleton lagged the video in Unity):** a FILE is now held to its own clock (`pace_decision`, `can_catch_up_by_dropping`, `--drop-late`): late frames are dropped, but only when the next frame is already decoded, because
+dropping never saves decode time (a first version posed 13 of 1,934 frames on the 4K file). Heartbeat gained `speed=` and `late=`. 1080p copy: speed 1.00 standalone, 0.99 live in Unity; 4K original: 0.77 standalone / 0.69 live, with a warning.
+`tests/test_video_source.py` **150/150**, 11 mutations caught. Full record: Unity repo `docs/tasks.md` "F-52 FOLLOW-UP 2".
+
 **NOT TESTED:** a real phone or USB camera with `--max-poses`; two or three real people in a room (the only multi-person clip is the 8-dancer
 one, a stress test; a side-by-side composite of two single-person clips was used for ground truth); the crowd scenes fed by this on a screen;
 Unity's new `Video Max People` field has not been seen in the Editor; an FP16 detector; detecting every other frame; other GPUs.

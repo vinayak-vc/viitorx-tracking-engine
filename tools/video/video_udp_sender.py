@@ -88,6 +88,7 @@ import os
 import re
 import shutil
 import socket
+import queue
 import subprocess
 import sys
 import tempfile
@@ -534,6 +535,192 @@ def orient_frame(frame, rotate_degrees, flip_horizontal):
     return frame
 
 
+#: A FILE frame this many frame periods behind its due time is dropped instead of processed. 1.5 keeps the
+#: skeleton within ~50 ms of the picture at 30 fps while still posing most frames; a larger value lets the
+#: lag (and so the visible offset against the video) grow before anything is done about it.
+LATE_DROP_PERIODS = 1.5
+
+
+def pace_decision(due, now, src_fps, drop_late):
+    """What to do with a FILE frame that was due at `due` (seconds) when it is `now`: (sleep_seconds, drop).
+
+    Ahead of the clip's clock: sleep (at most 0.25 s at a time, so a stop request is noticed).
+    Behind it by more than LATE_DROP_PERIODS frame periods and `drop_late` is on: drop the frame, so the
+    clip's CLOCK is held and the skeleton stays in step with the picture, at a lower frame rate.
+    Otherwise process it.
+
+    WHY. Without this a file is processed frame by frame no matter how long that takes, so a clip that
+    needs 50 ms a frame against a 33 ms period plays at 0.65x: measured live in Unity on a 4K two-person
+    clip, 18.6 fps against 29.97, so after 10 s of real time the skeleton was ~4 s behind the video it
+    was meant to mirror. Dropping late frames makes the clip run at its own speed whenever the machine
+    can decode fast enough, and costs nothing when it already keeps up.
+    """
+    wait = due - now
+    if wait > 0:
+        return min(wait, 0.25), False
+    if drop_late and -wait > LATE_DROP_PERIODS / src_fps:
+        return 0.0, True
+    return 0.0, False
+
+
+def can_catch_up_by_dropping(prefetching, pending, read_s, reads, src_fps):
+    """Is dropping a late FILE frame worth doing right now?
+
+    Dropping saves the time spent POSING a frame, never the time spent DECODING it. So it can only help when
+    the next frame is already available: with a prefetching reader that is `pending > 0`; with a plain
+    reader (decode on the loop's own thread) it is when decoding is clearly cheaper than a frame period.
+    When decoding is the bottleneck (a 4K file) every frame arrives late, a rule that drops late frames
+    drops them ALL, and nothing is posed - measured: 13 poses out of 1,934 - so the answer is no and the
+    clip plays at the decoder's speed instead.
+    """
+    if prefetching:
+        return pending > 0
+    return reads > 0 and (read_s / reads) < 0.9 / src_fps
+
+
+class LoadTicker:
+    """Keeps the supervisor's heartbeat fed while a BLOCKING model load runs.
+
+    The supervisor kills a child whose stdout has not grown for 10 s. The loads here are one blocking call
+    each and print nothing while they run - and they are not short: ADR-082 measured the FP32 pose model
+    at 13.8 s to become ready (FP16 6.8 s), and the multi-person path adds the detector. Observed live
+    from Unity: `HeartbeatTimeout` at 11.2 s into the first launch, a kill, a backoff, and a second launch
+    that worked only because the files were now in the OS cache. So the same `frames=0 sent=0 <note>` line
+    the sender already prints once is repeated every HEARTBEAT_SECONDS for as long as the load lasts.
+    """
+
+    def __init__(self, note, interval=HEARTBEAT_SECONDS):
+        self._note = note
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="load-ticker", daemon=True)
+
+    def _run(self):
+        while not self._stop.wait(self._interval):
+            print("[vid] frames=0 sent=0 %s" % self._note, flush=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        return False
+
+
+#: Frames a prefetching file reader may decode ahead. A 4K frame is ~25 MB, so 6 is ~150 MB at the worst
+#: and enough to ride out a slow frame: the 4K VP9 clip measured a median 33 ms to decode but spikes to
+#: ~150 ms, which is several frame periods.
+PREFETCH_FRAMES = 6
+
+#: Above this many pixels a FILE is decoded on its own thread unless --no-prefetch. 2.5 MP sits between
+#: 1080p-class video (2.07 MP, 13 ms a frame measured) and 4K (8.29 MP, 33 ms), where decoding stops
+#: being a rounding error next to inference and starts to serialise with it.
+PREFETCH_PIXELS = 2500000
+
+
+class PrefetchCapture:
+    """A cv2.VideoCapture for a FILE that decodes ahead on its own thread.
+
+    WHY. The file loop decodes, then infers, then decodes: the two add. A 4K clip decodes in ~33 ms
+    (mean 41 ms with the key-frame spikes) and a multi-person solve takes ~30 ms, so serial they gave
+    ~14 fps and a clip that played at under half speed. Overlapped, the pace is whichever is slower.
+    That does not make a 4K file real-time - decode alone tops out near 24 fps on the machine this was
+    measured on, and more FFmpeg threads did not change it - but it removes the wasted half.
+
+    It keeps every frame and its order (no dropping: a file is not a live source), so nothing downstream
+    changes; it offers only the calls the sender uses. The properties the sender reads are captured at
+    construction, because a VideoCapture is not safe to query while another thread is reading it.
+    """
+
+    def __init__(self, cap, depth=PREFETCH_FRAMES):
+        self._cap = cap
+        self._props = {
+            cv2.CAP_PROP_FPS: cap.get(cv2.CAP_PROP_FPS),
+            cv2.CAP_PROP_FRAME_WIDTH: cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+            cv2.CAP_PROP_FRAME_HEIGHT: cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+        }
+        self._queue = queue.Queue(maxsize=max(1, int(depth)))
+        self._stop = threading.Event()
+        self._ended = False
+        self._thread = threading.Thread(target=self._run, name="file-prefetch", daemon=True)
+        self._thread.start()
+
+    def _put(self, item):
+        """Queue `item`, giving up quietly once release() has been called."""
+        while not self._stop.is_set():
+            try:
+                self._queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self):
+        try:
+            while not self._stop.is_set():
+                ok, frame = self._cap.read()
+                if not ok:
+                    self._put((False, None))
+                    return
+                if not self._put((True, frame)):
+                    return
+        except cv2.error:
+            # A decode error is the end of the clip as far as the sender can tell; the sender's own
+            # "opened but produced no frames" / replay logic takes it from here.
+            self._put((False, None))
+
+    def isOpened(self):
+        return self._cap.isOpened()
+
+    def pending(self):
+        """How many decoded frames are waiting right now. The pacing code uses it: a late frame is only worth
+        dropping when the next one is already here."""
+        return self._queue.qsize()
+
+    def get(self, prop):
+        return self._props.get(prop, 0.0)
+
+    def read(self):
+        """(ok, frame) in decode order; (False, None) at the end of the clip, and on every call after."""
+        if self._ended:
+            return False, None
+        while True:
+            try:
+                ok, frame = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if not self._thread.is_alive():
+                    self._ended = True
+                    return False, None
+                continue
+            if not ok:
+                self._ended = True
+            return ok, frame
+
+    def release(self):
+        self._stop.set()
+        self._thread.join(timeout=3.0)
+        try:
+            self._cap.release()
+        except cv2.error:
+            pass
+
+
+def open_file_capture(path, prefetch):
+    """A capture for a local video file, decoding ahead when `prefetch` is True; None if it cannot open.
+
+    `prefetch` None means automatic: on for anything over PREFETCH_PIXELS.
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        cap.release()
+        return None
+    if prefetch is None:
+        prefetch = (cap.get(cv2.CAP_PROP_FRAME_WIDTH) * cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) > PREFETCH_PIXELS
+    return PrefetchCapture(cap) if prefetch else cap
+
+
 def list_cameras():
     """Print which camera indices open and at what size. For picking the index of a phone webcam."""
     found = 0
@@ -585,6 +772,11 @@ def main():
                          "cameras and streams.")
     ap.add_argument("--realtime", action=argparse.BooleanOptionalAction, default=True,
                     help="FILES: pace to the clip's own frame rate (default). --no-realtime runs flat out.")
+    ap.add_argument("--drop-late", action=argparse.BooleanOptionalAction, default=True,
+                    help="FILES with --realtime: when processing falls behind the clip's own clock, drop frames "
+                         "to hold it, so the skeleton stays in step with the picture (at a lower frame rate) "
+                         "instead of drifting behind. --no-drop-late processes every frame, however long that "
+                         "takes (the clip then plays in slow motion).")
     ap.add_argument("--ownership", action=argparse.BooleanOptionalAction, default=False,
                     help="run F-21 target ownership. OFF: a video has one subject, and ADR-083 "
                          "documents F-21 withholding frames from a subject who walks.")
@@ -611,6 +803,10 @@ def main():
                     help="F-52: person-detector ONNX for --max-poses > 1 (default "
                          "python-sidecar~/models/yolox_s.onnx, or VIRTUAL_MIRROR_DETECTOR). Fetch it "
                          "with tools/model/fetch_yolox_s.py.")
+    ap.add_argument("--prefetch", action=argparse.BooleanOptionalAction, default=None,
+                    help="FILES: decode ahead on a separate thread so decoding and inference overlap instead "
+                         "of adding. Default: automatic - on for files over 2.5 megapixels (4K), where decoding "
+                         "(~33 ms a frame measured) is as slow as the pose stage. Ignored by cameras and streams.")
     ap.add_argument("--det-conf", type=float, default=0.45,
                     help="F-52: person-detector confidence. 0.45 is the OAK-D path's value, not yet "
                          "tuned for this detector.")
@@ -669,12 +865,13 @@ def main():
               flush=True)
         reader = LatestFrameReader(opener, name=kind).start()
     else:
-        cap = cv2.VideoCapture(path)
-        if not cap.isOpened():
+        cap = open_file_capture(path, a.prefetch)
+        if cap is None:
             print("[vid] ERROR OpenCV cannot open %s (unsupported codec, or not a video)" % path,
                   flush=True)
             return 2
-        print("[vid]   source      : %s" % path, flush=True)
+        print("[vid]   source      : %s%s" % (path, "  (decoding ahead on its own thread)"
+                                              if isinstance(cap, PrefetchCapture) else ""), flush=True)
     print("[vid]   orientation : rotate %d deg, %s" % (a.rotate, "mirrored" if a.flip else "not mirrored"),
           flush=True)
     print("[vid]   depth       : estimated from subject height %.2f m%s   src flags: %s"
@@ -694,7 +891,8 @@ def main():
     if "DmlExecutionProvider" not in eps:
         print("[vid]   !! no DirectML - inference falls back to CPU (~5 fps). Use the sidecar venv.",
               flush=True)
-    model = R.RTMW3D(a.model)
+    with LoadTicker("loading RTMW3D ..."):
+        model = R.RTMW3D(a.model)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     multi = None
@@ -704,7 +902,8 @@ def main():
         import host_person_detector as HPD
         import host_multiperson as HMP
         try:
-            detector = HPD.HostPersonDetector(a.detector, conf=a.det_conf)
+            with LoadTicker("loading the person detector ..."):
+                detector = HPD.HostPersonDetector(a.detector, conf=a.det_conf)
         except RuntimeError as e:
             print("[vid] ERROR %s" % e, flush=True)
             return 2
@@ -730,12 +929,18 @@ def main():
     # focal length derives from the width, so none of this can be known before a frame exists.
     ctx = {"w": 0, "h": 0, "fx": 0.0, "fy": 0.0, "intr": None, "src_fps": 30.0, "state": None}
 
+    # FILE pacing numbers, for the heartbeat and the one-time "too slow to keep up" warning.
+    pace = {"speed": None, "late": 0, "read_s": 0.0, "reads": 0, "warned": False}
+
     def heartbeat(note=""):
         el = max(1e-6, time.time() - t_run)
         extra = ""
         if reader is not None:
             extra = " live=%s dropped=%d reconnects=%d" % ("Y" if reader.connected else "n",
                                                            reader.dropped, reader.reconnects)
+        if pace["speed"] is not None:
+            # How fast the CLIP is advancing against the wall clock: 1.00 is real time, 0.62 is slow motion.
+            extra += " speed=%.2f late=%d" % (pace["speed"], pace["late"])
         if multi is not None:
             extra += " " + multi.summary()
         print("[vid] frames=%d sent=%d skipped=%d fps~%.1f replay=%d%s %s"
@@ -772,7 +977,10 @@ def main():
                     last_beat = time.time()
                     continue
             else:
+                t_read = time.perf_counter()
                 ok, frame = cap.read()
+                pace["read_s"] += time.perf_counter() - t_read
+                pace["reads"] += 1
                 if not ok:
                     if loop_frame == 0:
                         # Opened but yielded nothing: a decode failure from the first frame. Looping on
@@ -783,8 +991,8 @@ def main():
                     if a.loop > 0 and replay >= a.loop:
                         break
                     cap.release()
-                    cap = cv2.VideoCapture(path)
-                    if not cap.isOpened():
+                    cap = open_file_capture(path, a.prefetch)
+                    if cap is None:
                         print("[vid] ERROR could not reopen %s for replay" % path, flush=True)
                         return 2
                     ctx["state"] = fresh_state() if ctx["w"] else None
@@ -825,10 +1033,40 @@ def main():
                 # at inference speed, then arrives at the subject with the wall clock far behind the
                 # video and plays flat out until it catches up. The wait comes BEFORE inference, so a
                 # frame is never stale by the time it is posed. A live source is its own clock.
+                if loop_frame == 2:
+                    # Re-anchor the clock once the FIRST frame is done: its cost is the one-off model warm-up
+                    # (the GPU compiles its graphs on the first run), which is not lag and must not be
+                    # "caught up" by dropping the next second of the clip.
+                    t_loop = time.time() - (loop_frame - 1) / src_fps
                 due = t_loop + (loop_frame - 1) / src_fps
-                wait = due - time.time()
-                if wait > 0:
-                    time.sleep(min(wait, 0.25))
+                # Dropping a frame only helps if the NEXT one is already decoded and waiting: it saves the
+                # time spent posing this one, never the time spent decoding it. When decoding itself is the
+                # bottleneck (a 4K file) every frame arrives late, a rule that drops late frames drops them
+                # ALL - measured: 13 poses out of 1,934 - so in that case nothing is dropped and the clip
+                # simply plays at the decoder's speed, with a warning.
+                prefetching = isinstance(cap, PrefetchCapture)
+                can_catch_up = can_catch_up_by_dropping(prefetching, cap.pending() if prefetching else 0,
+                                                        pace["read_s"], pace["reads"], src_fps)
+                nap, drop = pace_decision(due, time.time(), src_fps, a.drop_late and can_catch_up)
+                if nap > 0:
+                    time.sleep(nap)
+                if loop_frame > 1:
+                    pace["speed"] = ((loop_frame - 1) / src_fps) / max(1e-6, time.time() - t_loop)
+                if (not pace["warned"] and loop_frame >= 120 and pace["speed"] is not None
+                        and pace["speed"] < 0.9 and not can_catch_up and pace["reads"] > 0):
+                    pace["warned"] = True
+                    print("[vid] WARNING the clip is advancing at %.2fx real time and dropping frames cannot fix it: "
+                          "frames reach the loop slower than the %.0f ms frame period (a %dx%d file decodes slowly). "
+                          "Use a lower-resolution copy of the clip (e.g. 1080p) to play it in real time."
+                          % (pace["speed"], 1000.0 / src_fps, ctx["w"], ctx["h"]), flush=True)
+                if drop:
+                    pace["late"] += 1
+                    # A dropped frame skips the heartbeat below, and the supervisor kills a child that goes
+                    # quiet for 10 s: keep talking even while every frame in a stretch is being dropped.
+                    if time.time() - last_beat >= HEARTBEAT_SECONDS:
+                        last_beat = time.time()
+                        heartbeat()
+                    continue
             # `lat` for a live source starts when the frame was GRABBED, so the time it waited for the
             # model is counted; for a file there is no capture time and it starts at decode.
             t_frame = t_grab if t_grab is not None else time.time()

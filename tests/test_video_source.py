@@ -388,6 +388,253 @@ args2 = SUP.build_arg_parser().parse_args(
 ok, why = SUP.Supervisor(args2)._validate(False)
 check(not ok and "--video" in why, "the supervisor refuses a video sender with no --video", why)
 
+# ---- F-52: the heartbeat must survive a long, silent model load ------------------------------------------
+print("")
+print("load ticker (supervisor kills a child silent for 10 s; the FP32 model alone takes ~14 s to load)")
+import contextlib
+import io as _io
+
+buf = _io.StringIO()
+with contextlib.redirect_stdout(buf):
+    with V.LoadTicker("loading RTMW3D ...", interval=0.05):
+        _time.sleep(0.4)
+    after_exit = buf.getvalue()
+    _time.sleep(0.2)
+lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+check(len(lines) >= 4, "a load that lasts several intervals prints several heartbeat lines", "%d lines in 0.4 s at 0.05 s" % len(lines))
+check(buf.getvalue() == after_exit, "nothing is printed after the load has finished")
+hb = SUP.parse_heartbeat(buf.getvalue())
+check(hb is not None and hb["Frames"] == 0 and hb["Sent"] == 0 and hb["Note"] == "loading RTMW3D ...",
+      "the supervisor reads the line as frames=0, sent=0, note 'loading RTMW3D ...' (what the MODEL light keys on)", str(hb))
+check(V.HEARTBEAT_SECONDS <= 5.0, "the default interval is well inside the supervisor's 10 s limit", "%.1f s" % V.HEARTBEAT_SECONDS)
+
+buf = _io.StringIO()
+raised = False
+with contextlib.redirect_stdout(buf):
+    try:
+        with V.LoadTicker("loading ...", interval=0.05):
+            _time.sleep(0.15)
+            raise RuntimeError("the load failed")
+    except RuntimeError:
+        raised = True
+    stopped_at = buf.getvalue()
+    _time.sleep(0.2)
+check(raised, "an error inside the load propagates (the ticker never swallows it)")
+check(buf.getvalue() == stopped_at, "...and the ticker has stopped by then, so a dead sender does not keep claiming to be loading")
+src_text = open(V.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+check('with LoadTicker("loading RTMW3D ...")' in src_text and 'with LoadTicker("loading the person detector ...")' in src_text,
+      "both blocking loads (pose model, person detector) run under the ticker")
+
+# ---- F-52: a FILE must play at its own speed, or say why it cannot -----------------------------------------
+print("")
+print("holding a file to its own clock")
+P = 1.0 / 30.0
+nap, drop = V.pace_decision(10.0, 9.9, 30.0, True)
+check(abs(nap - 0.1) < 1e-9 and not drop, "ahead of the clock: sleep until the frame is due", "%.3f s" % nap)
+check(V.pace_decision(10.0, 5.0, 30.0, True) == (0.25, False), "a long wait is taken 0.25 s at a time")
+check(V.pace_decision(10.0, 10.0 + 0.5 * P, 30.0, True) == (0.0, False), "a little behind: process it")
+check(V.pace_decision(10.0, 10.0 + 1.4 * P, 30.0, True) == (0.0, False), "under 1.5 frame periods behind: still process it")
+check(V.pace_decision(10.0, 10.0 + 1.6 * P, 30.0, True) == (0.0, True), "more than 1.5 frame periods behind: drop it")
+check(V.pace_decision(10.0, 11.0, 30.0, False) == (0.0, False), "--no-drop-late never drops, however far behind")
+check(V.pace_decision(10.0, 10.0 + 1.6 * P, 60.0, True) == (0.0, True) and V.pace_decision(10.0, 10.0 + 1.6 * P, 24.0, True) == (0.0, False),
+      "the tolerance is in FRAME PERIODS of the clip's own rate, not a fixed time")
+check(V.can_catch_up_by_dropping(True, 2, 0.0, 0, 30.0) and not V.can_catch_up_by_dropping(True, 0, 0.0, 0, 30.0),
+      "prefetching: drop only when the next frame is already decoded and waiting")
+check(V.can_catch_up_by_dropping(False, 0, 0.010, 1, 30.0) and not V.can_catch_up_by_dropping(False, 0, 0.040, 1, 30.0)
+      and not V.can_catch_up_by_dropping(False, 0, 0.0, 0, 30.0),
+      "plain reader: drop only when decoding is clearly cheaper than a frame period, and never before it is measured")
+
+
+def simulate_file(decode_s, pose_s, frames=900, fps=30.0, drop_late=True, prefetch=True):
+    """The pacing loop on a simulated clock: frame k can be read at k*decode_s (a prefetching reader decodes
+    ahead from t=0; a plain reader decodes in the loop). Returns (frames_posed, clip_speed)."""
+    period = 1.0 / fps
+    t = 0.0
+    posed = 0
+    for k in range(frames):
+        if prefetch:
+            available = (k + 1) * decode_s
+            t = max(t, available)
+            # frames already decoded beyond this one (the reader is at most 6 ahead)
+            pending = min(6, max(0, int(t / decode_s) - (k + 1)))
+            reads, read_s = 1, 0.0 if pending > 0 else decode_s
+        else:
+            t += decode_s
+            pending, reads, read_s = 0, 1, decode_s
+        due = k * period
+        can_drop = V.can_catch_up_by_dropping(prefetch, pending, read_s, reads, fps)
+        nap, drop = V.pace_decision(due, t, fps, drop_late and can_drop)
+        t += nap
+        if drop:
+            continue
+        t += pose_s
+        posed += 1
+    return posed, (frames * period) / t
+
+
+posed, speed = simulate_file(0.005, 0.050)
+check(speed > 0.95 and posed > 0.4 * 900, "posing is the bottleneck (50 ms a frame, 5 ms to decode): dropping holds real time",
+      "speed %.2fx, %d of 900 posed" % (speed, posed))
+posed_nd, speed_nd = simulate_file(0.005, 0.050, drop_late=False)
+check(speed_nd < 0.7, "...which is what --no-drop-late gives up: slow motion", "speed %.2fx" % speed_nd)
+posed, speed = simulate_file(0.041, 0.035)
+check(posed > 0.9 * 900, "DECODING is the bottleneck (41 ms to decode, 35 ms to pose): frames are NOT thrown away for nothing",
+      "%d of 900 posed (the earlier rule posed 13 of 1,934)" % posed)
+check(0.7 < speed < 0.85, "...and the clip plays at the decoder's speed, honestly", "speed %.2fx" % speed)
+posed, speed = simulate_file(0.004, 0.020)
+check(posed >= 890 and speed > 0.98, "a machine that keeps up drops nothing and runs at real time", "speed %.2fx, %d posed" % (speed, posed))
+
+src_text = open(V.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+check('"--drop-late"' in src_text and "BooleanOptionalAction, default=True" in src_text, "--drop-late exists and is on by default")
+check("speed=%.2f late=%d" in src_text, "the heartbeat reports the clip's speed and the dropped-frame count")
+check("can_catch_up_by_dropping(" in src_text and "a.drop_late and can_catch_up" in src_text,
+      "the loop only drops when dropping can actually catch up")
+check("if loop_frame == 2:" in src_text and "t_loop = time.time() - (loop_frame - 1) / src_fps" in src_text,
+      "the clock is re-anchored after the first frame, so the one-off model warm-up is not mistaken for lag")
+hb = SUP.parse_heartbeat("[vid] frames=300 sent=250 skipped=2 fps~19.0 replay=0 speed=0.77 late=40 people=2 tracks=2 dets=2 detect~9.6ms pose~12.1ms ")
+check(hb is not None and hb["Frames"] == 300 and hb["Sent"] == 250 and hb["Note"] == "",
+      "the supervisor still parses the heartbeat with the new fields, and its note stays empty", str(hb))
+
+# ---- F-52: decoding a big FILE on its own thread --------------------------------------------------------
+print("")
+print("prefetching file capture")
+import cv2
+
+
+class FakeCap:
+    """A VideoCapture stand-in: scripted frames, optional per-read delay, optional decode error."""
+
+    def __init__(self, n, delay=0.0, fail_at=None):
+        self.n = n
+        self.delay = delay
+        self.fail_at = fail_at
+        self.reads = 0
+        self.released = False
+
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return {cv2.CAP_PROP_FPS: 30.0, cv2.CAP_PROP_FRAME_WIDTH: 3840.0, cv2.CAP_PROP_FRAME_HEIGHT: 2160.0}.get(prop, 0.0)
+
+    def read(self):
+        if self.delay:
+            _time.sleep(self.delay)
+        if self.fail_at is not None and self.reads == self.fail_at:
+            raise cv2.error("scripted decode failure")
+        if self.reads >= self.n:
+            return False, None
+        self.reads += 1
+        return True, np.full((2, 2, 3), self.reads, dtype=np.uint8)
+
+    def release(self):
+        self.released = True
+
+
+pf = V.PrefetchCapture(FakeCap(8))
+got = []
+while True:
+    ok, frame = pf.read()
+    if not ok:
+        break
+    got.append(int(frame[0, 0, 0]))
+check(got == list(range(1, 9)), "every frame arrives, in decode order", str(got))
+check(pf.read() == (False, None) and pf.read() == (False, None), "after the end it keeps answering (False, None), never blocks")
+pf.release()
+
+fast = FakeCap(100)
+pf = V.PrefetchCapture(fast, depth=3)
+_time.sleep(0.4)
+check(fast.reads <= 3 + 1, "decoding ahead is bounded by the queue depth", "%d frames read with nobody consuming" % fast.reads)
+t0 = _time.time()
+pf.release()
+check(_time.time() - t0 < 2.0 and fast.released, "release() with a full queue stops promptly and releases the capture",
+      "%.2f s" % (_time.time() - t0))
+check(not pf._thread.is_alive(), "the decode thread is gone after release()")
+
+pf = V.PrefetchCapture(FakeCap(100), depth=4)
+_time.sleep(0.3)
+check(pf.pending() == 4, "PrefetchCapture.pending() reports how many decoded frames are waiting", str(pf.pending()))
+pf.read()
+_time.sleep(0.2)
+check(pf.pending() == 4, "...and refills as frames are taken")
+pf.release()
+
+N_FRAMES, STEP = 15, 0.02
+t0 = _time.time()
+cap_serial = FakeCap(N_FRAMES, delay=STEP)
+while True:
+    ok, f = cap_serial.read()
+    if not ok:
+        break
+    _time.sleep(STEP)             # "inference"
+serial = _time.time() - t0
+t0 = _time.time()
+pf = V.PrefetchCapture(FakeCap(N_FRAMES, delay=STEP))
+while True:
+    ok, f = pf.read()
+    if not ok:
+        break
+    _time.sleep(STEP)             # the same "inference"
+overlapped = _time.time() - t0
+pf.release()
+check(overlapped < 0.8 * serial, "decode and inference overlap: the pace is the slower of the two, not their sum",
+      "serial %.2f s -> overlapped %.2f s" % (serial, overlapped))
+
+escaped = []
+saved_hook = threading.excepthook
+threading.excepthook = lambda args: escaped.append(args.exc_type.__name__)
+pf = V.PrefetchCapture(FakeCap(10, fail_at=4))
+got = []
+while True:
+    ok, frame = pf.read()
+    if not ok:
+        break
+    got.append(int(frame[0, 0, 0]))
+_time.sleep(0.2)
+threading.excepthook = saved_hook
+check(got == [1, 2, 3, 4], "a decode error ends the clip cleanly after the frames before it, with no hang", str(got))
+check(escaped == [], "...and the error does not escape the decode thread as an unhandled exception", str(escaped))
+pf.release()
+
+fc = FakeCap(1)
+pf = V.PrefetchCapture(fc)
+fc.get = lambda prop: -1.0          # a VideoCapture must not be queried while another thread reads it
+check(pf.get(cv2.CAP_PROP_FPS) == 30.0 and pf.get(cv2.CAP_PROP_FRAME_WIDTH) == 3840.0 and pf.get(12345) == 0.0
+      and pf.isOpened(), "the properties the sender reads are captured up front (never re-queried); unknown ones are 0.0")
+pf.release()
+
+vid = os.path.join(tmp, "tiny.avi")
+vw = cv2.VideoWriter(vid, cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (320, 240))
+for i in range(5):
+    vw.write(np.full((240, 320, 3), 40 * i, dtype=np.uint8))
+vw.release()
+c_small = V.open_file_capture(vid, None)
+check(c_small is not None and not isinstance(c_small, V.PrefetchCapture),
+      "automatic: a small file is read directly, exactly as before (no thread)")
+c_small.release()
+saved = V.PREFETCH_PIXELS
+V.PREFETCH_PIXELS = 1000
+c_auto = V.open_file_capture(vid, None)
+check(isinstance(c_auto, V.PrefetchCapture), "automatic: a file over the pixel threshold is prefetched")
+frames_read = 0
+while c_auto.read()[0]:
+    frames_read += 1
+check(frames_read == 5, "...and a real file is read through it frame for frame", str(frames_read))
+c_auto.release()
+V.PREFETCH_PIXELS = saved
+c_forced = V.open_file_capture(vid, True)
+check(isinstance(c_forced, V.PrefetchCapture), "--prefetch forces it on a small file")
+c_forced.release()
+c_off = V.open_file_capture(vid, False)
+check(c_off is not None and not isinstance(c_off, V.PrefetchCapture), "--no-prefetch forces it off")
+c_off.release()
+check(V.open_file_capture(os.path.join(tmp, "does_not_exist.avi"), None) is None, "an unopenable file gives None, not an exception")
+check(V.PREFETCH_PIXELS == 2500000 and 1920 * 1080 < V.PREFETCH_PIXELS < 3840 * 2160,
+      "the automatic threshold sits between 1080p and 4K")
+src_text = open(V.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+check('"--prefetch"' in src_text and "BooleanOptionalAction, default=None" in src_text, "--prefetch exists and defaults to automatic")
+
 print("")
 print("-" * 78)
 print("%d/%d assertions passed" % (PASS, PASS + FAIL))

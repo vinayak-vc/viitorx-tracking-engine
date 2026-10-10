@@ -18,6 +18,14 @@
 
 ---
 
+## 2026-10-10 (even later): THREE FIXES FROM THE FIRST LIVE TWO-PERSON RUN (F-52 follow-up)
+
+`LoadTicker` keeps the `frames=0 sent=0 loading ...` heartbeat going during blocking model loads (the supervisor kills a child silent for 10 s; the FP32 model needs ~14 s);
+`PrefetchCapture` decodes a big FILE on its own thread (`--prefetch`, automatic over 2.5 MP); Unity now passes the FP16 model. Details: Unity repo `docs/tasks.md` "F-52 FOLLOW-UP".
+**Carry forward:** do not remove the ticker "because READY already printed" (READY comes before the model loads); a 4K file cannot play in real time here (decode ~24 fps).
+
+---
+
 ## 2026-10-10 (latest): A PHONE / WEBCAM / VIDEO CAN DRIVE SEVERAL SKELETONS (F-52)
 
 Report and ADR are in the **Unity repo**: `docs/tasks.md` F-52, `docs/decisions.md` **ADR-088**. What is in THIS repo:

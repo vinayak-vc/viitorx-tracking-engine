@@ -318,6 +318,11 @@ scene consumes it unchanged).
   track disappears. Ids are never reused: a person gone for longer than the tracker's 1.2 s hold is a new id on return.
 * Limits: no stereo (hip depth from apparent height; a person whose ankles are hidden gets 2.0 m), no F-21 ownership, ids fragment under
   heavy occlusion.
+* **Big files:** a video over 2.5 megapixels (4K) is decoded on its own thread so decoding and inference overlap (`--prefetch` / `--no-prefetch`; automatic by default). Measured on a 4K
+  two-person clip: 13.4 -> 21.8 fps. 4K decode alone tops out near 24 fps, so a 1080p copy is what plays in real time. Downscaling a 4K source before the pose stage gained nothing (measured).
+* **A file plays at its own speed:** when posing falls behind the clip's clock, late frames are dropped (`--drop-late`, default on; `--no-drop-late` processes every frame in slow motion) so the skeleton stays in step with the picture.
+  The heartbeat shows `speed=` (1.00 is real time) and `late=`. Dropping only helps when the next frame is already decoded: if DECODING is the limit (4K) the sender plays at the decoder's speed and warns - use a 1080p copy.
+* **Slow starts are not hangs:** while the pose model or the person detector loads, the sender repeats its `frames=0 sent=0 loading ...` line every 2 s, so the supervisor's 10 s silence limit does not fire.
 * **From Unity:** `AppBootstrap > Video Max People`. It reaches the sender through the supervisor's `--video-max-poses N` (forwarded as `--max-poses N`). That is
   a separate flag from the supervisor's `--max-poses`, which is the OAK multi-person cap and is ignored by the video sender.
 
@@ -372,7 +377,7 @@ after the ADR-065 reorganisation:
 .venv\Scripts\python.exe tools\diagnostics27_humanized_analyze.py --selftest   # 18 passed
 
 # F-49 video source: classification, atomic bounded download, supervisor command shape.
-.venv/Scripts/python.exe tests/test_video_source.py           # 105/105
+.venv/Scripts/python.exe tests/test_video_source.py           # 150/150
 # F-51 the supervisor copies the sender's heartbeat into supervisor_state.json (`Child`), for Unity's status lights.
 .venv/Scripts/python.exe tests/test_supervisor_state.py       # 32/32
 # F-52 host-side person detector + multi-person layer (scripted networks; the real-network layer skips when the weights are absent).

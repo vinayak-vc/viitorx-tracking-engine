@@ -1,6 +1,6 @@
 # AI handoff — Python tracking sidecar
 
-> **Read this first. Updated 2026-09-15.**
+> **Read this first. Updated 2026-09-17.**
 >
 > **Where the detailed reports live.** This file was last substantively updated at F-08 (2026-09-08)
 > and was 14 features stale. Since roughly F-16 the project's feature reports and ADRs have been
@@ -15,6 +15,107 @@
 > That is the working convention, and `AGENTS.md` §12 has not caught up with it. **Do not** start a
 > second parallel set of ADRs here — read the Unity repo's `docs/decisions.md` and append there. This
 > file is kept as the pointer and the current-state summary, which is what it is for.
+
+---
+
+## 2026-10-10 (even later): THREE FIXES FROM THE FIRST LIVE TWO-PERSON RUN (F-52 follow-up)
+
+`LoadTicker` keeps the `frames=0 sent=0 loading ...` heartbeat going during blocking model loads (the supervisor kills a child silent for 10 s; the FP32 model needs ~14 s);
+`PrefetchCapture` decodes a big FILE on its own thread (`--prefetch`, automatic over 2.5 MP); Unity now passes the FP16 model. Details: Unity repo `docs/tasks.md` "F-52 FOLLOW-UP".
+**Carry forward:** do not remove the ticker "because READY already printed" (READY comes before the model loads); a 4K file cannot play in real time here (decode ~24 fps).
+
+---
+
+## 2026-10-10 (latest): A PHONE / WEBCAM / VIDEO CAN DRIVE SEVERAL SKELETONS (F-52)
+
+Report and ADR are in the **Unity repo**: `docs/tasks.md` F-52, `docs/decisions.md` **ADR-088**. What is in THIS repo:
+`tools/video/host_person_detector.py` (YOLOX-s on the GPU), `tools/video/host_multiperson.py` (detector -> `PersonTracker` -> one
+pose per person), `video_udp_sender.py --max-poses N`, `sidecar_supervisor.py --video-max-poses N`, `tools/model/fetch_yolox_s.py`,
+`tests/test_host_multiperson.py` (73/73).
+
+**Start here to try it:** `.venv/Scripts/python.exe tools/model/fetch_yolox_s.py`, then
+`.venv/Scripts/python.exe tools/video/video_udp_sender.py --video ..\..\video\456.webm --max-poses 3 --port 18899`.
+Throughput (decode excluded): 2 people 35.5 fps, 3 people 26.3, 5 people 17.5, 8 people 14.8.
+
+**Carry forward:** (1) default `--max-poses 1` is the old single-person path and must stay byte-for-byte; (2) do NOT give this path
+F-33's synthetic depth — it paints every box with one distance and flattens the model's own z; (3) `PersonTracker` and `build_*` are shared
+with the OAK-D sender, change them in one place; (4) Unity asks for it through the supervisor's `--video-max-poses` (NOT `--max-poses`, which Unity always sends for the OAK sender and the video sender
+must never inherit — `tests/test_video_source.py` pins this); (5) 3 people is 26 fps, under the camera's 30.
+
+---
+
+## 2026-10-10 (later): THE SUPERVISOR NOW REPORTS THE SENDER'S HEARTBEAT (F-51)
+
+Unity's status lights (Unity repo: `docs/tasks.md` F-51, **ADR-087**) need to tell "alive" from "model running" from "a person found".
+`sidecar_supervisor.py` therefore copies the sender's latest `frames= sent= ...` line into `supervisor_state.json` as `Child` (fields in
+`README.md`). `tests/test_supervisor_state.py` pins it (32/32). **Carry forward:** (1) the field names are a contract with Unity — do not
+rename them without changing `SidecarStatusModel`; (2) `SidecarReady` is NOT "model loaded"; (3) the parser must never raise: it runs
+inside the watchdog.
+
+---
+
+## 2026-10-10: A PHONE CAN BE THE CAMERA, OVER WEBRTC (F-50)
+
+Report and ADR are in the **Unity repo** as usual: `docs/tasks.md` F-50, `docs/decisions.md` **ADR-086**,
+`docs/ai_handoff.md`. What changed in THIS repo:
+
+```text
+tools/video/lan_camera.py          NEW   frame source: joins a LAN Camera Streaming room as the viewer (aiortc + Socket.IO)
+tools/video/video_udp_sender.py    +     source kind `lan`; fatal-error exit; frame-size-change re-derivation
+tests/test_lan_camera.py           NEW   78/78 alone, 103/103 with CAMERA_SERVER_DIR (real Node server + model)
+tests/_lan_fake_sender.py          NEW   test helper: a fake phone built on aiortc
+requirements.txt / .lock.txt       +     aiortc, python-socketio[asyncio_client], aiohttp (+24 transitive pins)
+README.md                          +     "A phone over WebRTC" section, test line
+```
+
+**Carry forward:** (1) it is a SOURCE inside the video sender, not a second program; (2) the PIN arrives ONLY as the
+`CAMERA_PIN` environment variable — never accept it in `--video` or a flag; (3) a wrong PIN is fatal (exit 2), an occupied
+room or an unreachable server is retried; (4) `RTCPeerConnection.close()` is bounded at 3 s because it was measured hanging;
+(5) before installing anything into the venv, `pip freeze` first — this install was diffed and moved nothing.
+**Unproven:** everything involving a real phone or network (see the Unity repo's F-50 NOT DONE list).
+The LAN camera project's `docs/receiver-guide.md` documents the server's side of this contract for a receiver in any language.
+
+---
+
+## 0. 2026-09-17: MULTI-PERSON EXISTS NOW (F-32), AND IT RUNS THE FULL FILTER CHAIN (F-33)
+
+Two features that change what this repo is. Reports and ADRs are in the **Unity repo** as usual:
+`docs/F32_MULTIPERSON_2026-09-17.md` (ADR-070), `docs/F33_PER_PERSON_FILTERS_2026-09-17.md`
+(ADR-071). Design summary: `architecture.md` → *Multi-person*.
+
+```text
+F-32   multi-person detection + identity tracking        BUILT, recorded video only
+F-33   per-person P0 + P1-1 + F-22 filter chains         BUILT AND MEASURED, same caveat
+```
+
+**A correction came out of it, and it matters more than either feature.** F-29 treated `456.webm` as
+one subject at 2.9 m and drew range conclusions from it. **The clip contains seven dancers.** The
+tracked body's shoulder width ranges 0.068–0.455 m — a chimera assembled from whichever dancers fell
+inside the migrating crop. Every "degradation with distance" figure from that clip measured IDENTITY
+CONTAMINATION. A genuine single subject at 1.96 m gives 93.7% plausible hands; the real limit beyond
+~2 m is **untested**. The single-person pipeline does not fail loudly on multi-person input — it
+emits a plausible skeleton belonging to nobody, and those numbers reached a report.
+
+**Three things to carry forward:**
+
+1. `multiperson_udp_sender.py` is a SECOND program, not a mode. `wholebody_udp_sender.py` is
+   byte-identical and stays the single-person production path.
+2. A temporal filter belongs to an IDENTITY. The tracker re-sorts most-established-first every
+   frame, so `PersonFilterPool` is keyed on the track id, never on list position.
+3. `freq` is not cosmetic. One-Euro derives velocity as `delta * freq`, and this loop runs at ~16 fps
+   with three people. Told 30, the filter is worse on jitter AND lag at once; at 10 fps it is worse
+   than no filter at all on the median frame.
+
+```text
+implausible steps (>300 mm/frame)   2158 unfiltered -> 77 with F-33, over 2060 person-frames
+filter cost                         0.88 ms per person-frame vs 20.7 ms for the pose solve
+lag at 30 fps                       233 ms - NOT new, it is the single-person tuning. Always say it.
+budget                              RTMW3D 20.7 ms, fixed batch of 1 -> 2 people 24 fps, 3 -> 16
+tests                               270/270 across the suite (46 new)
+```
+
+**NOT TRUE:** never run with real people; the video A/B's stereo depth is synthetic; a slow confident
+drift is still followed (847 mm of an injected 850 mm — P1-4's job, and P1-4 is rejected).
 
 ---
 

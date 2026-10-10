@@ -305,20 +305,22 @@ evidence/oak_v4/f20a/bones_*.jsonl
 !evidence/oak_v4/f20b/*.txt
 !evidence/oak_v4/f20b/*.md
 !evidence/oak_v4/f20b/tests/
-!evidence/oak_v4/f20b/tests/*.json
-!evidence/oak_v4/f20b/tests/*/
-!evidence/oak_v4/f20b/tests/*/*.json
-!evidence/oak_v4/f20b/tests/*/*.jsonl
-!evidence/oak_v4/f20b/tests/*/*.log
-!evidence/oak_v4/f20b/live/
-!evidence/oak_v4/f20b/live/*.json
-!evidence/oak_v4/f20b/live/*.jsonl
-!evidence/oak_v4/f20b/live/*.log
+!evidence/oak_v4/f20b/tests/summary.json
+# REVISED POLICY (2026-10-10): git keeps the RESULT of an F-20B run, not the run. tests/summary.json is
+# the verdict (6/6 PASS, with the timings and session ids) and is the one file worth a diff. Everything a
+# run WRITES is regenerable, rewritten on every run, and was producing a 17-file dirty tree after each
+# one: the per-scenario supervisor.log / events / state, the harness stdout, logs/run_*.txt. The docs cite
+# only tests/a_normal_start/logs/run_001.txt, which was already ignored. The files stay on disk.
+# These come after the `!` rules on purpose: the last matching rule wins.
+evidence/oak_v4/f20b/tests/*/
+evidence/oak_v4/f20b/live/
 evidence/oak_v4/f20b/logs/
-evidence/oak_v4/f20b/tests/*/logs/
-evidence/oak_v4/f20b/tests/*/harness_stdout.txt
-evidence/oak_v4/f20b/live/logs/
-evidence/oak_v4/f20b/live/supervisor_stdout.txt
+# The supervisor's DEFAULT evidence directory is this folder, so whatever launched it last - Unity's Play,
+# a manual run - rewrites these three on every session. They describe that session, not a published
+# result, and a stale committed copy is exactly what a status reader must not mistake for a live one.
+evidence/oak_v4/f20b/supervisor.log
+evidence/oak_v4/f20b/supervisor_events.jsonl
+evidence/oak_v4/f20b/supervisor_state.json
 
 # ---- F-21 / F-22 / offline-soak evidence (2026-09-14 offline completion pass) ----------------
 # Same policy as f18/f19/f20a above: the small ANALYSIS outputs the reports actually quote are
@@ -355,4 +357,15 @@ evidence/oak_v4/f21/**/target_events.jsonl
 evidence/oak_v4/f21/**/*_rows.jsonl
 evidence/oak_v4/f21/**/*_events.jsonl
 evidence/oak_v4/f22/**/pose_events.jsonl
-evidence/oak_v4/
+# NOTE: do NOT re-add a bare `evidence/oak_v4/` rule here. The directory form stops git
+# descending into the tree, which silently defeats every `!evidence/oak_v4/**/*.png`
+# negation above - git cannot re-include a file whose parent directory is excluded. That is
+# why the ADR-056 / ADR-061 hand-off images were never committed, and so were lost when the
+# untracked captures were cleaned up. Line 243's `evidence/oak_v4/*` form excludes the
+# contents while still allowing the negations to work, and is the rule that belongs here.
+
+# F-32: the person-detection blob is fetched with blobconverter, not committed. It is a 2.3 MB
+# binary that any machine can re-download, and the fetch command is in multiperson_udp_sender.py's
+# error message and in the README.
+depthai_blazepose/models/person-detection-retail-0013_*.blob
+temp_SR1_f0.jpg

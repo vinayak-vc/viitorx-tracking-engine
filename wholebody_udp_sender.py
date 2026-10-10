@@ -16,7 +16,18 @@ Wire contract (JSON per UDP datagram, default 127.0.0.1:8899):
     "lh":  [[x,y,z] x21],        # left hand, hip-relative metres (MediaPipe/COCO-WB hand order)
     "rh":  [[x,y,z] x21],        # right hand
     "xyz": [hipX,hipY,hipZ],     # measured mid-hip, millimetres, camera space (avatar root)
-    "src": [0|1 x33] }           # 1 = measured depth, 0 = hip-plane fallback (debug/coverage)
+    "src": [0|1 x33],            # 1 = measured depth, 0 = hip-plane fallback (debug/coverage)
+    "st":  [-1..4 x33],          # F-29: P1-1/P1-4 state per joint. -1 no tracker, 0 TRACKED,
+                                 #   1 WEAK, 2 PREDICTED, 3 LOST, 4 RECOVERING
+    "own": "LOCKED",             # F-29: F-21 ownership state; ABSENT when --no-ownership
+    "lat": 41.3 }                # F-29: measured camera-timestamp -> payload-built latency, ms
+
+Note that feet are ALREADY carried in `lm`: build_body_landmarks emits R.FOOT_TO_JOINTID (big toes ->
+JointId 31/32, heels -> 29/30) alongside the COCO-17 body. There is no separate foot field and none is
+needed - a consumer that ignores those four slots is choosing to, not being denied the data.
+
+`st`/`own`/`lat` are a READ-ONLY trust channel: they echo decisions the pipeline already made so a
+consumer can display them. Nothing upstream reads them back, and omitting them changes no behaviour.
 
 Axes are camera space (X right, Y down, Z forward) as with the Phase-1 GHUM stream, so the Unity
 PoseSpaceConverter + poseFlipX/Y/Z tuning apply the same way. Run:
@@ -203,6 +214,40 @@ def build_hand(uv, xyz_cam, measured, conf, zrel, zrel_hip, mid_hip, hip_z, intr
     return out
 
 
+# ---- F-29 TRUST CHANNEL ------------------------------------------------------------------------
+# The pipeline's own verdict about each joint, published so a consumer can SHOW it. P1-1's tracker
+# states, P1-4's recovery and F-21's ownership already decide behaviour every frame; until now they
+# only ever reached a log file, so a viewer watching the skeleton had no way to tell a confidently
+# measured elbow from one being extrapolated through an occlusion. Both look identical on screen.
+#
+# THIS CHANGES NO BEHAVIOUR. It is a read-only echo of decisions already made upstream - adding a
+# field is backward compatible exactly as `sid` was (§F-20A), and a consumer that ignores `st`/`own`
+# behaves precisely as before.
+#
+# WHY A SENTINEL RATHER THAN A DEFAULT STATE: only the 12 joints in joint_tracker.DEFAULT_TRACKED
+# have a tracker at all. Reporting the other 21 as TRACKED would be a lie - the honest answer is
+# "this joint has no tracker", which is what NO_TRACKER means. A HUD must be able to draw that
+# difference or it overstates the system's own confidence, which is the opposite of the point.
+STATE_NO_TRACKER = -1
+
+
+def build_joint_states(res):
+    """P1-1/P1-4 tracking state per JointId slot, as 33 ints. `res` is SkeletonTracker.update()'s
+    output, keyed by WHOLEBODY index; the wire is JointId space, so the same COCO17_TO_JOINTID map
+    build_body_landmarks uses translates it. Untracked slots stay STATE_NO_TRACKER.
+
+    Values are joint_tracker.TrackingState's own ints (0 TRACKED, 1 WEAK, 2 PREDICTED, 3 LOST,
+    4 RECOVERING) - not a parallel enum that could drift out of step with it."""
+    st = [STATE_NO_TRACKER] * NUM_BODY
+    if not res:
+        return st
+    for wb_index, joint_id in R.COCO17_TO_JOINTID.items():
+        entry = res.get(wb_index)
+        if entry is not None:
+            st[joint_id] = int(entry[4])
+    return st
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -317,6 +362,27 @@ def main():
     parser.add_argument("--subpixel-bits", type=int, default=-1,
                         help="F-19: -1 (default) = production stereo settings untouched. "
                              "0 = sub-pixel off, 3 = 1/8 px (the configuration F-18 validated).")
+    # F-43: the OAK-D-PRO's IR dot projector, which had never been switched on. It textures blank
+    # walls and plain clothing for the mono pair without appearing in the IR-cut RGB frame, so it
+    # buys depth exactly where block matching fails. Default ON; 0 restores the previous behaviour.
+    # F-44 WORKING VOLUME. Both sensors are 1280x800 and the pipeline discarded half the linear
+    # resolution on each path. These are the two independent 2x levers, and neither costs GPU time:
+    # RTMW3D always resizes its crop to 288x384 and the person detector always runs at 544x320, so
+    # the pose solve (20.4 ms/person, the expensive part) is UNCHANGED. The cost lands on the VPU
+    # and USB. Defaults leave production exactly as shipped.
+    parser.add_argument("--mono-res", default="", choices=["", "400p", "480p", "720p", "800p"],
+                        help="F-44: stereo mono resolution. Empty (default) = untouched. 800p "
+                             "doubles focal px, so f.B doubles and depth error HALVES at every "
+                             "range. Costs VPU time in the stereo matcher.")
+    parser.add_argument("--rgb-isp", default="", choices=["", "1/1", "1/2"],
+                        help="F-44: RGB ISP scale. Empty (default) = untouched (1/2 -> 640x400). "
+                             "1/1 keeps the native 1280x800 at full FOV, which doubles pixels on a "
+                             "body and therefore doubles the distance at which the pose model sees "
+                             "the same detail. Costs USB bandwidth.")
+    parser.add_argument("--ir-dot", type=float, default=D.IR_DOT_INTENSITY,
+                        help="F-43: IR laser dot projector intensity, 0..1 (default %(default)s). "
+                             "0 turns it off, restoring the pre-F-43 unassisted stereo pair. "
+                             "Ignored with a banner note on boards that have no IR driver.")
     parser.add_argument("--log-dir", default="", help="pipeline logging: write sender_log.jsonl (seq + key landmarks per SENT frame) to this dir, to diff against Unity's recv_log.jsonl / model_log.jsonl via compare_logs.py. Empty = off.")
     # ---- F-21 TARGET OWNERSHIP ---------------------------------------------------------------
     # Default ON: an unattended installation must not silently switch to a second person (F-19's
@@ -368,6 +434,11 @@ def main():
         # banner and the pipeline cannot disagree.
         D.STEREO_CONFIG["subpixel"] = args.subpixel_bits > 0
         D.STEREO_CONFIG["subpixelBits"] = args.subpixel_bits
+    # F-44: same rule - mutate the shared config, never the pipeline call, so one place decides.
+    if args.mono_res:
+        D.STEREO_CONFIG["monoRes"] = args.mono_res
+    if args.rgb_isp:
+        D.STEREO_CONFIG["rgbIsp"] = tuple(int(v) for v in args.rgb_isp.split("/"))
 
     log_f = None
     holds_f = None
@@ -386,6 +457,7 @@ def main():
     print("[wb] loading RTMW3D ...")
     model = R.RTMW3D(args.model)
     print("[wb] providers:", model.active_providers)
+    print("[wb] model:", model.describe())  # F-45: fp16 vs fp32 is 2.97x, and only the file says which
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     addr = (args.host, args.port)
@@ -420,6 +492,9 @@ def main():
               % (PORTRAIT.fov_deg(intr[0], dw), PORTRAIT.fov_deg(intr[1], dh)))
         # Read back from oak_depth.STEREO_CONFIG, never hand-written: see the note there.
         print("[wb]   stereo: %s" % D.stereo_config_str())
+        # F-43. Reports what the DEVICE actually did, not what was asked for, so a board without the
+        # emitter says so here instead of silently looking identical to one that has it.
+        print("[wb]   IR dot projector: %s" % D.enable_ir_dot_projector(device, args.ir_dot))
         print("[wb]   depth sampling: surfaceDepth=%s kwin=%d (F-08)"
               % (args.surface_depth, args.kwin))
         print("[wb]   working-distance target: 0.90 m (F-18 preferred)")
@@ -756,7 +831,7 @@ def main():
                         _preview(frame, uv, conf, args.conf, frames, sent,
                                  "F21 %s" % _own_state, ownership=_own_snap,
                                  candidate_count=int(raw_hip_valid), cue=_cue)
-                        if cv2.waitKey(1) in (27, ord("q")):
+                        if cv2.waitKey(1) == ord("q"):
                             break
                     continue
             else:
@@ -813,7 +888,7 @@ def main():
                 if args.show:
                     _preview(frame, uv, conf, args.conf, frames, sent, "no hip depth",
                              ownership=_own_snap, candidate_count=int(raw_hip_valid), cue=_cue)
-                    if cv2.waitKey(1) in (27, ord("q")):
+                    if cv2.waitKey(1) == ord("q"):
                         break
                 continue
             hip_z = float(mid_hip[2])
@@ -862,6 +937,7 @@ def main():
             # drops it -- which hands the decision to the P0 LimbGate in Unity exactly as
             # a real occlusion would. The tracker never writes zeros itself.
             conf_emit = conf
+            _track_res = None   # F-29: post-P1-4 per-joint states, echoed on the wire for the HUD
             if skel is not None:
                 t_track0 = time.perf_counter()
                 pos_in, cnf_in, dv_in = {}, {}, {}
@@ -879,6 +955,10 @@ def main():
                     rec_out = recovery.apply(res, pos_in,
                                              collect_events=(holds_f is not None))
                     res = dict((k, v[:6]) for k, v in rec_out.items())
+                # F-29: captured AFTER P1-4 so the wire reports the state the emitted geometry
+                # actually has. Reading it before recovery would show LOST for a joint that was
+                # reconstructed and sent - the HUD would contradict the skeleton next to it.
+                _track_res = res
                 conf_emit = conf.copy()
                 for _j, (_x, _y, _z, _c, _st, _usable) in res.items():
                     if _usable:
@@ -945,7 +1025,18 @@ def main():
                 "seq": frames,                 # monotonic frame id (aligns sender/recv/model logs)
                 "sid": SESSION_ID,             # F-20A: per-PROCESS id; seq is only monotonic within it
                 "t": round(time.time(), 4),    # send epoch seconds
+                # ---- F-29 trust channel (read-only; drives nothing) ----------------------------
+                "st": build_joint_states(_track_res),   # P1-1/P1-4 state per JointId, -1 = untracked
+                # Sensor-to-send latency in ms, MEASURED not estimated: the camera timestamp through
+                # to this payload being built. Unity adds its own receive->present leg to get a true
+                # end-to-end number; neither half is guessable from the other side alone.
+                "lat": round(float((time.time() - t_cap) * 1000.0), 1),
             }
+            # F-21 lock state, when ownership is enabled (--no-ownership omits the field entirely
+            # rather than sending a fake "LOCKED", so a HUD can distinguish "not running" from "not
+            # locked"). Both are real conditions and they mean opposite things to an operator.
+            if _own_state is not None:
+                message["own"] = _own_state
             # H7: only include a hand when confidently tracked. Unity treats a missing lh/rh as
             # "not tracked" and holds the rest pose instead of curling fingers from noise.
             if lh is not None:
@@ -1042,7 +1133,12 @@ def main():
             if args.show:
                 _preview(frame, uv, conf, args.conf, frames, sent, "hip %.2fm" % hip_z,
                          ownership=_own_snap, candidate_count=int(raw_hip_valid), cue=_cue)
-                if cv2.waitKey(1) in (27, ord("q")):
+                # ESC IS NOT A QUIT KEY (all three preview sites). Unity's own on-screen hint reads
+                # "ESC menu", so ESC is the key a person presses while this window happens to have
+                # focus - and it used to end the producer. Measured on 2026-09-17: "SIDECAR EXIT
+                # rc=0 uptime=30.6s cause=exited", a clean exit 30 seconds into a session nobody
+                # meant to end. The supervisor restarted it, which is why it was survivable at all.
+                if cv2.waitKey(1) == ord("q"):
                     break
 
     sock.close()

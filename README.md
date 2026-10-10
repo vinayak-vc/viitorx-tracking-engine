@@ -249,6 +249,138 @@ different environments and only the venv has DirectML. See `docs/ai_handoff.md` 
 .venv\Scripts\python.exe tools\deployment20b_fake_sidecar.py
 ```
 
+### Video as the source — the same wire, from a file or a link (F-49)
+
+`tools/video/video_udp_sender.py` runs the production single-person pipeline (RTMW3D, the production
+landmark builders, P1-1 states) on a video and sends the **same datagram** the OAK-D senders send, so
+Unity — every scene, the skeleton show, the VRM avatar — runs unchanged. Unity launches it through the
+supervisor when `AppBootstrap > Video Test Source > Track From Video` is ticked; by hand:
+
+```bash
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video ../../video/SR7.mp4
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video https://example.com/clip.mp4
+```
+
+`--video` is a local path, a **direct** http(s) link to a video file (downloaded once into
+`--cache-dir`, default the OS temp folder), or a web page, which needs `yt-dlp` — **not installed in the
+venv**; snapshot `pip freeze` before installing it. Only `http`, `https` and existing files are accepted.
+
+A **phone or webcam** works too: `--video camera:0` (a phone shows up here when DroidCam / Iriun / Camo expose it as a
+Windows webcam; `--list-cameras` shows which indices open), or a phone "IP camera" app over Wi-Fi as
+`--video http://192.168.1.5:8080/video`, or `--video rtsp://host/stream`. Add `--rotate 90|180|270` for a sideways portrait
+phone and `--flip` for a front camera; both act on the image before the model. A live source is processed newest-frame-only
+(stale frames are dropped, never queued) and reconnects on loss. Credentials in a link are never printed.
+
+#### A phone over WebRTC — the LAN Camera Streaming viewer link (F-50)
+
+`--video http://192.168.1.5:3000/viewer?room=room-abc123` (or `lan:<url>`) is a **LAN Camera Streaming** viewer link:
+the phone's browser sender page streams over WebRTC and this process joins the room as the viewer
+(`tools/video/lan_camera.py`, a utility with the same surface as `LatestFrameReader`). Nothing to install on the phone.
+
+```bash
+set CAMERA_PIN=123456
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video "http://192.168.1.5:3000/viewer?room=room-abc123" --rotate 90
+```
+
+* **The PIN is never in the link or on the command line.** It comes from the `CAMERA_PIN` environment variable
+  (Unity sets it for the sidecar it launches, from `AppBootstrap > Lan Camera Pin`). A link that carries `pin=` is refused.
+* **One viewer per room.** A browser viewer tab open in the same room blocks this reader; it keeps retrying, so closing
+  the tab is the fix. A wrong PIN, an invalid room or a media-mode mismatch ends the sender with exit code 2 and one
+  clear line (never the PIN); an unreachable server is retried forever.
+* Needs `aiortc`, `python-socketio[asyncio_client]` and `aiohttp` (in `requirements.txt` / `requirements.lock.txt`);
+  imported only when a LAN camera is used. Snapshot `pip freeze` before touching the venv: installing them was checked
+  not to move numpy, OpenCV, onnxruntime-directml or protobuf.
+* Only the newest frame is processed; a phone that changes resolution mid-stream is noticed and the crop/intrinsics are
+  re-derived. If the avatar lies sideways use `--rotate 90|270` (aiortc ignores a phone's orientation header).
+* When WebRTC cannot connect (router client isolation, firewall, a phone on another network with no TURN entry on the
+  server) the log says so with the likely causes. There is no MJPEG/tunnel fallback in this utility.
+* The server's side of the contract (events, errors, pitfalls, a checklist for a receiver in any language) is documented in the LAN
+  camera project: `lan-camera-streaming/docs/receiver-guide.md`. `lan_camera.py` is written to it and is a Python reference.
+
+#### Several people from a phone, webcam or video — `--max-poses N` (F-52)
+
+A phone, a webcam and a video file have no OAK-D, so the production crowd detector (on the OAK's VPU) is not available. `--max-poses 2`
+or more adds a **host-side person detector** (YOLOX-s, Apache-2.0, on the same GPU) and the F-32 `PersonTracker` in front of the same
+pose model, and sends the F-32 `persons[]` datagram (persons[0] is also published at the root in the single-person shape, so every
+scene consumes it unchanged).
+
+```bash
+.venv/Scripts/python.exe tools/model/fetch_yolox_s.py          # once: 35.9 MB, size and SHA-256 verified, not in version control
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video <clip|camera:0|viewer link> --max-poses 3
+```
+
+* `--max-poses 1` (default) is the old single-person path, unchanged; the detector is not even imported.
+* `--detector <onnx>` / `VIRTUAL_MIRROR_DETECTOR` choose the weights; `--det-conf` (0.45, the OAK path's value, not tuned for this
+  detector) the bar for "a person".
+* Each person costs one sequential pose solve. Measured on an RTX 3060 (decode excluded): 2 people 35.5 fps, 3 people 26.3,
+  5 people 17.5, 8 people 14.8.
+* Each person has their own z filter and P1-1 joint tracker (the single-person video chain), keyed by track id and released 3 s after the
+  track disappears. Ids are never reused: a person gone for longer than the tracker's 1.2 s hold is a new id on return.
+* Limits: no stereo (hip depth from apparent height; a person whose ankles are hidden gets 2.0 m), no F-21 ownership, ids fragment under
+  heavy occlusion.
+* **Big files:** a video over 2.5 megapixels (4K) is decoded on its own thread so decoding and inference overlap (`--prefetch` / `--no-prefetch`; automatic by default). Measured on a 4K
+  two-person clip: 13.4 -> 21.8 fps. 4K decode alone tops out near 24 fps, so a 1080p copy is what plays in real time. Downscaling a 4K source before the pose stage gained nothing (measured).
+* **A file plays at its own speed:** when posing falls behind the clip's clock, late frames are dropped (`--drop-late`, default on; `--no-drop-late` processes every frame in slow motion) so the skeleton stays in step with the picture.
+  The heartbeat shows `speed=` (1.00 is real time) and `late=`. Dropping only helps when the next frame is already decoded: if DECODING is the limit (4K) the sender plays at the decoder's speed and warns - use a 1080p copy.
+* **Slow starts are not hangs:** while the pose model or the person detector loads, the sender repeats its `frames=0 sent=0 loading ...` line every 2 s, so the supervisor's 10 s silence limit does not fire.
+* **From Unity:** `AppBootstrap > Video Max People`. It reaches the sender through the supervisor's `--video-max-poses N` (forwarded as `--max-poses N`). That is
+  a separate flag from the supervisor's `--max-poses`, which is the OAK multi-person cap and is ignored by the video sender.
+
+#### Camera setup and tips for better results (a phone, webcam, USB camera or video)
+
+What follows is split into what was **measured** (with the numbers) and what is **general advice that was not measured here**; the difference is marked.
+
+**1. Resolution does not change how fast the pose runs - 1080p or 720p is plenty.** *(measured)* The detector sees a 640 px picture and the pose model a fixed 288x384 crop around each person, cut from the original pixels.
+The same two-person clip at native 4K, 1920 wide and 1280 wide took 29.6 / 29.2 / 29.4 ms per frame and gave identical joints (21.0) and jitter (8.5 / 8.4 / 8.5 mm). So a higher-resolution camera does not make
+inference slower - and a lower one does not make it faster. A 720p camera gives the same frame rate as a 1080p one; an 8K one would only add bandwidth, decoding and memory (~100 MB a frame) for nothing the pose stage can use.
+
+**2. Where resolution DOES cost something is getting the frames to the model.** *(measured for files)* Decoding a 4K VP9 **file** took 33 ms a frame (spikes to ~150 ms) against 3.3 ms for the same clip at 1080p, and capped playback near 24 fps on this
+machine, so it played in slow motion (0.62x live in Unity). A live USB camera sends frames in its own format, so that figure does not carry over - **a 4K USB camera was not measured** - but it would still need more USB bandwidth and decoding than the pose stage can use.
+Set the camera to **1080p (or 720p)**. A 4K FILE should be re-encoded to 1080p first (`ffmpeg -i in.webm -vf scale=1920:1080 -c:v libx264 -crf 20 -an out.mp4`); the sender says so (`WARNING the clip is advancing at 0.69x ...`) when decoding is the limit.
+
+**3. What actually sets the frame rate is GPU time per person.** *(measured, RTX 3060, FP16 model)* About 9 ms a person standalone and 10-15 ms while Unity is rendering. Two people: ~35 fps standalone, ~25 fps live in Unity; three people: ~26 fps standalone; five: ~17.
+The heartbeat's `speed=` shows whether a FILE is keeping up (1.00 = real time). To go faster: fewer people (`Video Max People` = the number really there), a lighter Unity (a built player rather than the Editor; close other GPU programs), and the FP16 model (automatic when `rtmw3d-x-fp16.onnx` is present).
+
+**4. A 60 fps camera will not give 60 fps of skeleton.** *(reasoned from the measurements above)* A live source processes only the newest frame and discards the rest, and two people cost ~28-40 ms a frame, so the output stays at roughly 25-35 fps whatever the camera delivers. 60 fps still helps in two ways: the newest frame
+is at most ~16 ms old instead of ~33 ms (less latency), and cameras usually use a shorter exposure at 60 fps, which means less motion blur on fast moves *(general knowledge, not measured here)*. It needs good light.
+
+**5. Framing matters more than resolution.**
+* **Whole body in view, hips and ankles included.** A person is only posed when both hips are confident; hip DEPTH is estimated from the nose-to-ankle span, so a person for whom fewer than two of {nose, ankles} are visible falls back to 2.0 m and sits at the wrong distance *(from the code; seen on the occluded back row of the 8-dancer clip)*.
+* **Big enough in the picture:** the pose crop is 384 px tall, so a person at least ~400 px tall (about 37% of the frame height at 1080p) loses nothing. A ~170 px person (the same clip at 288x512) cost +12% jitter *(measured)*; anything much smaller is stretched and loses detail.
+* **Do not stack people.** Heavy overlap is what splits identities: on the 8-dancer clip the tracker used 12 ids for 8 people; two dancers side by side kept exactly 2 ids over 1,934 frames *(measured)*. Ids are never reused, so a person gone for over ~1.2 s returns as a new id.
+* **A fixed, level camera at about hip or chest height**, landscape for 2-3 people side by side. Level it if you can: a tilted mount distorts the geometry (the `Camera Tilt Degrees` setting was built for the OAK-D's stereo depth; whether it helps a monocular source was not checked).
+* **Clothing that contrasts with the background** and nobody standing in front of a busy pattern *(general advice)*.
+
+**6. Camera settings** *(general advice)*: MJPEG over USB 3; **fixed exposure and fixed focus** (auto-exposure and autofocus make the picture pump and hunt while someone dances); even lighting; a fast shutter for dance; the lens's real horizontal field of view.
+
+**7. Unity fields that change the result.** `Video Max People` (the real count); `Video Horizontal Fov Degrees` (the camera's actual horizontal FOV - it scales the pose, default 60); `Video Subject Height Metres` (sets the estimated distance, default 1.7); `Video Rotate Degrees` / `Video Flip Horizontal` for a sideways phone or a selfie camera;
+`Video Camera Size` 1920x1080 (or 1280x720).
+
+**8. Known limits that are not a camera problem.** No stereo, so depth is estimated per person; no F-21 ownership; the crowd scenes fed this way have not been checked by me on a screen; two or three REAL people from a real camera have not been recorded yet (the 2-person evidence is `147.webm`).
+
+#### Supervisor state and Unity's status lights (F-51)
+
+`sidecar_supervisor.py` writes `evidence/oak_v4/f20b/supervisor_state.json` every ~2 s. It now includes the sender's latest heartbeat, so
+Unity can show whether inference is running and whether anybody is being tracked without a sidecar window:
+
+```json
+{ "SupervisorState": "RUNNING", "SidecarReady": true, "RestartCount": 0, "...": "...",
+  "Child": { "Frames": 296, "Sent": 210, "Skipped": 85, "Live": "Y", "Note": "", "LineAgeSeconds": 1.7 } }
+```
+
+`Frames` = source frames the sender consumed, `Sent` = datagrams emitted (frames moving while `Sent` does not = nobody found), `Live` =
+`Y`/`n` for a live source, `Note` = the free text after the numbers (`loading RTMW3D ...`, `waiting for frames`), `LineAgeSeconds` = how long
+ago the sender's log last grew. `Child` is `null` until a heartbeat exists. **`SidecarReady` is not "model loaded"**: READY is marked at the
+first `frames=` line, which the senders print before loading the model. The Unity side (`SidecarStatusModel`, `SidecarStatusLights`) is
+the only consumer that depends on these field names; `tests/test_supervisor_state.py` pins this end.
+
+What it is not: **no stereo** (every `src` flag is 0 unless `--assume-measured`, which relabels and moves
+nothing), **no crowd** (the detector runs on the OAK-D's VPU), hip depth **estimated** from
+`--subject-height` and `--hfov`, F-21 **off** unless `--ownership`. `--depth-range MIN MAX` clamps the
+estimate; leave it off to let a clip's framing exercise Unity's F-48 operating volume. `--loop 0` (default)
+replays forever; after a finite `--loop N` it idles rather than exiting, because the supervisor would
+restart it. It prints the supervisor's readiness markers and a heartbeat, including while downloading.
+
 ### Phase 1 — BlazePose on the OAK-D VPU (fallback)
 
 ```bash
@@ -275,6 +407,16 @@ after the ADR-065 reorganisation:
 
 .venv\Scripts\python.exe tools\diagnostics26_fidelity_analyze.py --selftest    # 28 passed
 .venv\Scripts\python.exe tools\diagnostics27_humanized_analyze.py --selftest   # 18 passed
+
+# F-49 video source: classification, atomic bounded download, supervisor command shape.
+.venv/Scripts/python.exe tests/test_video_source.py           # 150/150
+# F-51 the supervisor copies the sender's heartbeat into supervisor_state.json (`Child`), for Unity's status lights.
+.venv/Scripts/python.exe tests/test_supervisor_state.py       # 32/32
+# F-52 host-side person detector + multi-person layer (scripted networks; the real-network layer skips when the weights are absent).
+.venv/Scripts/python.exe tests/test_host_multiperson.py       # 73/73
+# F-50 LAN camera (WebRTC): 78 assertions run anywhere; set CAMERA_SERVER_DIR to the lan-camera-streaming
+# project folder and it also drives that real Node server with a fake phone (and the model, for the full chain).
+.venv/Scripts/python.exe tests/test_lan_camera.py             # 103/103 with the server, 78/78 without
 
 # Replay + adversarial against a real capture (needs a --log-dir from a session).
 .venv\Scripts\python.exe tools\diagnostics\evaluate_p1.py --dir <capture-dir>
@@ -322,8 +464,150 @@ Local UDP, default `127.0.0.1:8899`, one JSON datagram per frame:
   "xyz": [hipX, hipY, hipZ],         // measured mid-hip, millimetres, camera space (root position)
   "src": [0|1, ...33],               // 1 = depth-measured, 0 = hip-plane fallback (debug)
   "seq": 1234,                       // monotonic frame id
-  "t":   1788846511.0234 }           // send epoch seconds
+  "t":   1788846511.0234,            // send epoch seconds
+  "st":  [-1..4, ...33],             // F-29 trust channel: P1-1/P1-4 state per joint
+  "own": "LOCKED",                   // F-29: F-21 ownership state  (OMITTED under --no-ownership)
+  "lat": 41.3 }                      // F-29: measured camera->payload latency, ms
 ```
+
+**Feet are inside `lm`, not a separate field.** `build_body_landmarks` emits `FOOT_TO_JOINTID`
+alongside the COCO-17 body: heels at JointId **29/30**, big toes at **31/32**. A consumer that
+ignores those four slots is choosing to, not being denied the data.
+
+### The F-29 trust channel (`st` / `own` / `lat`)
+
+Read-only: these echo decisions the pipeline has already made so a consumer can **display** them.
+Nothing upstream reads them back and omitting them changes no behaviour, so a consumer written
+before F-29 is unaffected.
+
+| `st` | meaning |
+|---|---|
+| `-1` | **no tracker covers this joint.** Only the 12 joints in `joint_tracker.DEFAULT_TRACKED` have one. This is a claim, not padding — reporting the other 21 as healthy would overstate what the system knows about them. |
+| `0`–`4` | `TrackingState`'s own ints: TRACKED, WEAK, PREDICTED, LOST, RECOVERING. Not a parallel enum, so the two cannot drift apart. |
+
+`st` is captured **after** P1-4, so it describes the geometry actually emitted — reading it before
+recovery would report `LOST` for a joint that was reconstructed and sent.
+
+`own` **absent** means ownership is not running (`--no-ownership`); it does **not** mean "not
+locked". Those mean opposite things to an operator and must not be rendered the same way.
+
+## Multi-person (F-32)
+
+`multiperson_udp_sender.py` is a SECOND sender that tracks several people at once. The production
+`wholebody_udp_sender.py` is untouched and remains the single-person path.
+
+```text
+OAK-D VPU : stereo depth (30 fps) + person detection (11.4 fps)   <- free, the VPU was idle
+host      : PersonTracker assigns persistent, never-reused ids    <- pure numpy
+host GPU  : RTMW3D per tracked person, N capped by --max-poses    <- 20.7 ms each, the budget
+```
+
+### The multi-person payload
+
+```jsonc
+{ "persons": [ { "id": 3,                  // STABLE across frames, never reused once retired
+                 "state": "CONFIRMED",     // or "LOST" (held through an occlusion on prediction)
+                 "lm":  [[x,y,z,vis] x33],
+                 "xyz": [hipX,hipY,hipZ],
+                 "src": [0|1 x33],
+                 "st":  [-1..4 x33],
+                 "lh":  [...], "rh": [...] },  ... ],
+  "n": 3,          // people posed this frame
+  "ndet": 5,       // people the DETECTOR saw - can exceed n, the GPU budget is the limit
+  "ntrack": 4,     // people the tracker is holding, posed or not
+  "seq": 1234, "sid": "...", "t": 1788846511.02, "lat": 41.3,
+
+  // ...PLUS every single-person field, carrying persons[0]:
+  "lm": [...], "xyz": [...], "src": [...], "st": [...], "lh": [...], "rh": [...] }
+```
+
+**The last part is the whole compatibility story.** The most-established person is republished at the
+payload ROOT in the exact single-person shape, so the Unity provider, the VRM mirror app and every
+existing experience scene consume this sender **unchanged and unaware** - they see one person, as
+they always have. Verified: `root lm == persons[0].lm` on every packet, and across 752 Unity frames
+the primary body and `Bodies[0]` were the same person.
+
+Cost: one duplicated person, ~6 KB of a ~9.3 KB payload (max measured 10.2 KB against a 65 KB UDP
+limit). `--no-legacy-primary` drops it for a purely multi-person consumer.
+
+### Budget - `--max-poses` is real
+
+RTMW3D is **20.7 ms p50** with a **fixed batch of 1** (no batch axis in the ONNX), so N people cost
+N sequential inferences:
+
+| people | pose ms | max fps |
+|---|---|---|
+| 2 | 41.4 | 24 |
+| 3 | 62.1 | 16 |
+| 4 | 82.8 | 12 |
+
+Defaults to 3. The tracker emits most-established-first, so the cap drops the people least likely to
+still be there next frame rather than an arbitrary subset.
+
+### The detector blob is not committed
+
+2.3 MB binary; fetch it once:
+
+```powershell
+.venv\Scripts\python.exe -c "import blobconverter,shutil;shutil.copy(blobconverter.from_zoo(name='person-detection-retail-0013',shaves=6,zoo_type='intel'),'depthai_blazepose/models/person-detection-retail-0013_openvino_2022.1_6shave.blob')"
+```
+
+### Per-person filters (F-33)
+
+Each tracked person carries a complete `person_filters.PersonFilters` chain - P0 `KeypointSmoother`,
+P1-1 `SkeletonTracker`, F-22 `PoseValidator`, and P1-4 available behind `--filter-recovery` and off -
+pooled on their **track id**, created when the identity is born and dropped 3 s after it stops being
+seen.
+
+Keyed on the id, never on list position: the tracker re-sorts people most-established-first every
+frame, so an index-keyed bank would hand one person's One-Euro history to another.
+
+**Each person measures their own sample rate.** One-Euro derives velocity as `delta * freq`, and this
+loop does not run at camera rate - three people cost three sequential 20.7 ms solves, so ~16 fps, and
+a person below `--max-poses` is updated rarer still. Told 30 while sampled at 16, the filter
+over-estimates speed by 1.9x and opens up exactly when it should damp. Measured against known ground
+truth (`tools/diagnostics/f33_filter_bench.py`):
+
+| 10 fps | jitter median | lag |
+|---|---|---|
+| no filters | 33.5 mm | 0 ms |
+| told `freq=30` (the naive port) | **35.6 mm** | 400 ms |
+| self-measured rate | 29.9 mm | 200 ms |
+
+The naive port is worse than not filtering at all on the median frame, while costing 400 ms of lag.
+
+**ADR-071: the feet and the head are in the filter group**, which the single-person sender never put
+them in. Implausible single-frame steps (over 300 mm in 33 ms - 9 m/s, not a person) across 2060
+person-frames of identical input:
+
+| | steps > 300 mm | worst step |
+|---|---|---|
+| `--no-filters` (raw F-32) | 2158 | 2091 mm |
+| `--no-filter-feet --no-filter-head` (single-person grouping) | 630 | 2018 mm |
+| default | **77** | **960 mm** |
+
+Cost: **0.88 ms per person-frame** against 20.7 ms for the pose solve. Off-switches for every arm of
+that table: `--no-filters`, `--no-adaptive-rate`, `--no-filter-feet`, `--no-filter-head`.
+
+### Known limits
+
+* **Lag is 233 ms at 30 fps.** Not introduced by F-33 - it is the accepted single-person tuning
+  (`--min-cutoff 0.5`, `--beta 0.4`). Quote it alongside any jitter figure.
+* **A slow confident drift is still followed** (847 mm of an injected 850 mm). P1-4 catches it
+  (264 mm) and P1-4 is rejected for production. Inherited from the single-person path on purpose.
+* **P1-1's horizons are counted in FRAMES**, so a 6-frame prediction spans ~375 ms at 16 fps against
+  ~200 ms in the single-person loop. Only the P0 smoother adapts to the real rate.
+* **Never run with two real people in front of the camera.** All evidence is recorded video.
+* Long occlusions still cost an identity. Metric depth should improve that; video cannot test it.
+  (The earlier "11 ids for 7 people" figure was machine-dependent - the video harness read the wall
+  clock, so its constant-velocity prediction changed with host speed. On the video clock it is
+  **9 ids across two passes**.)
+
+---
+
+`lat` is the sidecar's leg only. A consumer adds its own receive-to-present time for an end-to-end
+figure — and must compare `t` against its own **epoch** clock to do so, never against a
+monotonic/stopwatch clock.
 
 **A joint that fails the confidence gate — or that P1-1 marks `LOST` — is emitted as `[0,0,0,0]`.**
 That zero is the "invalid" signal, **not** a position. Unity must never interpolate a position toward

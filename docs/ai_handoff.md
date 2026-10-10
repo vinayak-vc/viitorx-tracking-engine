@@ -18,6 +18,24 @@
 
 ---
 
+## 2026-10-10 (latest): A PHONE / WEBCAM / VIDEO CAN DRIVE SEVERAL SKELETONS (F-52)
+
+Report and ADR are in the **Unity repo**: `docs/tasks.md` F-52, `docs/decisions.md` **ADR-088**. What is in THIS repo:
+`tools/video/host_person_detector.py` (YOLOX-s on the GPU), `tools/video/host_multiperson.py` (detector -> `PersonTracker` -> one
+pose per person), `video_udp_sender.py --max-poses N`, `sidecar_supervisor.py --video-max-poses N`, `tools/model/fetch_yolox_s.py`,
+`tests/test_host_multiperson.py` (73/73).
+
+**Start here to try it:** `.venv/Scripts/python.exe tools/model/fetch_yolox_s.py`, then
+`.venv/Scripts/python.exe tools/video/video_udp_sender.py --video ..\..\video\456.webm --max-poses 3 --port 18899`.
+Throughput (decode excluded): 2 people 35.5 fps, 3 people 26.3, 5 people 17.5, 8 people 14.8.
+
+**Carry forward:** (1) default `--max-poses 1` is the old single-person path and must stay byte-for-byte; (2) do NOT give this path
+F-33's synthetic depth — it paints every box with one distance and flattens the model's own z; (3) `PersonTracker` and `build_*` are shared
+with the OAK-D sender, change them in one place; (4) Unity asks for it through the supervisor's `--video-max-poses` (NOT `--max-poses`, which Unity always sends for the OAK sender and the video sender
+must never inherit — `tests/test_video_source.py` pins this); (5) 3 people is 26 fps, under the camera's 30.
+
+---
+
 ## 2026-10-10 (later): THE SUPERVISOR NOW REPORTS THE SENDER'S HEARTBEAT (F-51)
 
 Unity's status lights (Unity repo: `docs/tasks.md` F-51, **ADR-087**) need to tell "alive" from "model running" from "a person found".

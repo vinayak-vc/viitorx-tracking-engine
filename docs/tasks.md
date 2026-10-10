@@ -5,6 +5,44 @@ Scope boundary: sensor → signal → datagram. See `../AGENTS.md` §2.
 
 ---
 
+## ✅ F-52 — multi-person for a phone / webcam / video: a host-side detector in front of the F-32 tracker (2026-10-10) — BUILT AND MEASURED ON FILES
+
+Report and ADR live in the Unity repo: `docs/tasks.md` F-52, **ADR-088**. No wire change (the F-32 `persons[]` shape is reused).
+
+- [x] `tools/video/host_person_detector.py` — YOLOX-s (Apache-2.0) ONNX on the GPU via DirectML. The release is a RAW export
+      (`[1, 8400, 85]`: cell offsets and log sizes), so it decodes the grid itself and refuses any other output shape.
+- [x] `tools/video/host_multiperson.py` — `HostMultiPerson`: detector -> `PersonTracker` (unchanged) -> one RTMW3D solve per confirmed
+      person, each with its own z filter and P1-1 joint tracker (the single-person video chain, NOT F-33's synthetic-depth chain).
+- [x] `tools/video/video_udp_sender.py` — `--max-poses N` (default 1 = the old path, byte-for-byte), `--detector`, `--det-conf`.
+      The detector modules are imported only when N > 1.
+- [x] `sidecar_supervisor.py` — `--video-max-poses N` (default 1; > 1 is forwarded to the video sender as `--max-poses`, clamped to 8). A separate
+      flag on purpose: Unity always sends the OAK `--max-poses` and the video sender must never inherit it. `tests/test_video_source.py` **105/105** (+10).
+- [x] `tools/model/fetch_yolox_s.py` — downloads the weights to `models/yolox_s.onnx` (35,858,002 bytes) and refuses anything whose
+      size or SHA-256 differs. The file is not in version control (`*.onnx`); `models/` is invisible to Unity.
+- [x] `tests/test_host_multiperson.py` — **73/73** (arithmetic of the raw export, a fake network through the real `detect()`, the
+      multi layer with scripted networks, the default path untouched, the real networks on real clips). **15 mutations, all caught**
+      (two were first missed or caught only by a crash; the tests were strengthened).
+
+**Measured** (RTX 3060, DirectML, RTMW3D fp16; throughput EXCLUDES video decode):
+
+| `--max-poses` on `456.webm` (8 dancers, 1080x1920, 356 frames) | 2 | 3 | 5 | 8 |
+|---|---|---|---|---|
+| ms per frame / fps | 28.2 / **35.5** | 38.1 / **26.3** | 57.5 / 17.5 | 66.8 / 14.8 |
+| distinct ids posed (>= 30 frames) | 4 (3) | 6 (4) | 10 (8) | 12 (10) |
+
+Detector alone 8-12 ms. On the one-person clip `video.webm` the multi path reproduced the single path (shoulder 334 vs 333 mm, jitter
+14.1 vs 13.9 mm, 433 vs 435 datagrams); on `123.webm` it posed 550 frames against 570 (detector misses, cause not isolated).
+Through the sender a FILE runs at ~17 fps because decoding that 1080x1920 webm costs ~13 ms (spikes to 97 ms) on the same thread; a
+live source decodes on its own reader thread.
+
+**NOT TESTED:** a real phone or USB camera with `--max-poses`; two or three real people in a room (the only multi-person clip is the 8-dancer
+one, a stress test; a side-by-side composite of two single-person clips was used for ground truth); the crowd scenes fed by this on a screen;
+Unity's new `Video Max People` field has not been seen in the Editor; an FP16 detector; detecting every other frame; other GPUs.
+**Known limits:** a person whose ankles are hidden gets the 2.0 m default hip depth; under heavy occlusion ids fragment (12 ids for 8 people
+at cap 8); no F-21 ownership.
+
+---
+
 ## ✅ F-51 — the supervisor reports the sender's heartbeat (2026-10-10) — BUILT AND TESTED
 
 Report and ADR live in the Unity repo: `docs/tasks.md` F-51, **ADR-087** (Unity's five status lights consume this). No UDP wire change.

@@ -31,9 +31,12 @@ WHAT IS NOT, and the whole caveat
     and --hfov. It scales the scene; it does not invent articulation. It also decides whether the
     F-48 operating volume says TOO CLOSE: a close-up clip legitimately reads near. Change
     --subject-height or --depth-range to move a clip in or out of the volume.
-  * NO MULTI-PERSON. The crowd detector runs on the OAK-D's VPU and there is no host-side copy of it,
-    so a crowd scene fed from here sees a crowd of one. The single-person pipeline is what this is, and
-    with several people in frame its one crop hops between them.
+  * MULTI-PERSON IS OPT-IN (F-52, --max-poses 2 or more). By default this is the single-person
+    pipeline: ONE crop, no detector, and with several people in frame it follows whoever the crop starts
+    on. --max-poses N runs a host-side YOLOX-s person detector and the F-32 tracker in front of the
+    same pose model (host_person_detector.py, host_multiperson.py); see that module for what each
+    person gets and what it does not. The OAK-D's own VPU detector is still the production path for a
+    real camera; this is for a phone, a webcam or a video.
   * F-21 OWNERSHIP IS OFF by default (--ownership to enable). A walking subject in a clip is exactly
     the case ADR-083 says F-21 mishandles, and a video has no second person to defend against.
 
@@ -598,6 +601,19 @@ def main():
                     help="scale applied to the root's lateral/vertical translation. Z is never scaled.")
     ap.add_argument("--flatten-trunk", action=argparse.BooleanOptionalAction, default=False,
                     help="production's own default is OFF; see f23_video_to_unity.py")
+    # F-52. 1 (the default) is the F-49 single-person path, byte-for-byte: one crop, no detector.
+    ap.add_argument("--max-poses", type=int, default=1,
+                    help="F-52: how many people get a pose solve per frame. 1 = the single-person path "
+                         "(default, unchanged). 2 or more runs a host-side person detector and the "
+                         "multi-person tracker, so a phone, webcam or video can drive several skeletons. "
+                         "Each person costs one sequential pose solve.")
+    ap.add_argument("--detector", default=None,
+                    help="F-52: person-detector ONNX for --max-poses > 1 (default "
+                         "python-sidecar~/models/yolox_s.onnx, or VIRTUAL_MIRROR_DETECTOR). Fetch it "
+                         "with tools/model/fetch_yolox_s.py.")
+    ap.add_argument("--det-conf", type=float, default=0.45,
+                    help="F-52: person-detector confidence. 0.45 is the OAK-D path's value, not yet "
+                         "tuned for this detector.")
     a = ap.parse_args()
 
     if a.list_cameras:
@@ -681,6 +697,25 @@ def main():
     model = R.RTMW3D(a.model)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+    multi = None
+    if a.max_poses > 1:
+        # F-52. Imported only here: the single-person path must not pay for, or break on, the detector.
+        print("[vid] frames=0 sent=0 loading the person detector ...", flush=True)
+        import host_person_detector as HPD
+        import host_multiperson as HMP
+        try:
+            detector = HPD.HostPersonDetector(a.detector, conf=a.det_conf)
+        except RuntimeError as e:
+            print("[vid] ERROR %s" % e, flush=True)
+            return 2
+        multi = HMP.HostMultiPerson(model, detector, estimate_hip_depth, SESSION_ID, conf=a.conf,
+                                    max_poses=a.max_poses, subject_height=a.subject_height,
+                                    depth_range=a.depth_range, smooth_zrel=a.smooth_zrel,
+                                    sway_gain=a.sway_gain, flatten_trunk=a.flatten_trunk,
+                                    assume_measured=a.assume_measured)
+        print("[vid]   multi-person: up to %d people, detector %s, conf %.2f"
+              % (a.max_poses, detector.describe(), a.det_conf), flush=True)
+
     measured = np.zeros(133, dtype=bool)
     xyz_cam = np.zeros((133, 3), dtype=np.float32)
     xyz_cam_track = np.zeros((133, 3), dtype=np.float32)
@@ -701,6 +736,8 @@ def main():
         if reader is not None:
             extra = " live=%s dropped=%d reconnects=%d" % ("Y" if reader.connected else "n",
                                                            reader.dropped, reader.reconnects)
+        if multi is not None:
+            extra += " " + multi.summary()
         print("[vid] frames=%d sent=%d skipped=%d fps~%.1f replay=%d%s %s"
               % (frames, sent, skipped, sent / el, replay, extra, note), flush=True)
 
@@ -751,6 +788,8 @@ def main():
                         print("[vid] ERROR could not reopen %s for replay" % path, flush=True)
                         return 2
                     ctx["state"] = fresh_state() if ctx["w"] else None
+                    if multi is not None:
+                        multi.reset()
                     t_loop = time.time()
                     loop_frame = 0
                     continue
@@ -797,6 +836,19 @@ def main():
             if now - last_beat >= HEARTBEAT_SECONDS:
                 last_beat = now
                 heartbeat()
+
+            if multi is not None:
+                # F-52. The tracker's clock is the VIDEO's own timeline for a file (reproducible, and
+                # independent of how fast this machine chews through it) and the wall clock for a live
+                # source, where the wall clock is the frame clock.
+                multi.src_fps = src_fps
+                message = multi.process(frame, intr, now if live else loop_frame / src_fps, now, t_frame)
+                if message is None:
+                    skipped += 1
+                    continue
+                sock.sendto(json.dumps(message).encode("utf-8"), (a.host, a.port))
+                sent += 1
+                continue
 
             uv, zrel, conf = model.infer(frame, state["bbox"])
             # production M15 crop refinement, same blend as the live sender

@@ -121,6 +121,8 @@ _URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@")
 # reads; it changes nothing the supervisor decides.
 HEARTBEAT_RE = re.compile(r"frames=(\d+) sent=(\d+)(?: skipped=(\d+))?")
 LIVE_RE = re.compile(r"\blive=([Yn])\b")
+#: Most people the video sender is asked to pose. Measured up to 8 (F-52); the GPU budget is ~9 ms a person.
+VIDEO_MAX_PEOPLE = 8
 #: key=value / key~value fields stripped from a heartbeat so what is left is its free-text note.
 _HEARTBEAT_FIELD_RE = re.compile(r"\S+[=~]\S*")
 
@@ -395,6 +397,12 @@ class Supervisor(object):
                         str(self.args.video_camera_size[1])]
             if self.args.video_assume_measured:
                 cmd += ["--assume-measured"]
+            # F-52. Its OWN flag, not --max-poses: Unity always passes --max-poses (the OAK multi-person
+            # cap, default 3) and the video sender used to ignore it. Forwarding that value here would
+            # silently switch multi-person ON for every video session. 1 (the default) forwards
+            # nothing, so the single-person path is launched exactly as before.
+            if self.args.video_max_poses > 1:
+                cmd += ["--max-poses", str(min(self.args.video_max_poses, VIDEO_MAX_PEOPLE))]
             if self.args.video_cache_dir:
                 cmd += ["--cache-dir", self.args.video_cache_dir]
             return cmd
@@ -705,6 +713,11 @@ def build_arg_parser():
                      help="F-49: mirror each frame horizontally before inference (a front camera)")
     ap.add_argument("--video-camera-size", type=int, nargs=2, default=None, metavar=("W", "H"),
                      help="F-49: requested webcam resolution; ignored by files and streams")
+    ap.add_argument("--video-max-poses", type=int, default=1,
+                     help="F-52: people the VIDEO sender poses per frame. 1 (default) is the single-person "
+                          "path; 2 or more makes the sender run its host-side person detector and tracker "
+                          "(forwarded to it as --max-poses). Separate from --max-poses, which is the OAK-D "
+                          "multi-person cap and is ignored by the video sender.")
     ap.add_argument("--video-cache-dir", default=None,
                      help="F-49: where downloaded clips are kept (default: the OS temp folder)")
     ap.add_argument("--model", default=DEFAULT_MODEL)

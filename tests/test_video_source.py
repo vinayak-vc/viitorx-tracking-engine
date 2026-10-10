@@ -350,6 +350,38 @@ check(not unknown, "every forwarded flag is defined by video_udp_sender.py", str
 check(SUP.SENDER_BY_SCRIPT.get("video_udp_sender.py") == SUP.SENDER_VIDEO,
       "SENDER_BY_SCRIPT maps the sender by basename")
 
+# F-52: --video-max-poses. Unity ALWAYS passes the OAK multi-person --max-poses (default 3), so the video
+# sender must never inherit it: only --video-max-poses > 1 may switch multi-person on.
+def video_cmd(*extra):
+    a = SUP.build_arg_parser().parse_args(
+        ["--script", os.path.join(os.path.dirname(V.__file__), "video_udp_sender.py"),
+         "--video", "https://example.com/clip.mp4", "--evidence-dir", os.path.join(tmp, "ev3")] + list(extra))
+    return SUP.Supervisor(a).build_command()
+
+
+def max_poses_of(cmd):
+    return cmd[cmd.index("--max-poses") + 1] if "--max-poses" in cmd else None
+
+
+check(max_poses_of(video_cmd()) is None, "F-52: by default the video sender is NOT given --max-poses (single-person path)")
+check(max_poses_of(video_cmd("--max-poses", "5")) is None,
+      "F-52: the OAK multi-person --max-poses Unity always passes does NOT reach the video sender")
+check(max_poses_of(video_cmd("--video-max-poses", "1")) is None, "F-52: --video-max-poses 1 forwards nothing")
+check(max_poses_of(video_cmd("--video-max-poses", "0")) is None, "F-52: --video-max-poses 0 forwards nothing")
+check(max_poses_of(video_cmd("--video-max-poses", "3")) == "3", "F-52: --video-max-poses 3 -> the sender's --max-poses 3")
+check(max_poses_of(video_cmd("--video-max-poses", "3", "--max-poses", "5")) == "3",
+      "F-52: the video value wins over the OAK value")
+check(max_poses_of(video_cmd("--video-max-poses", "99")) == str(SUP.VIDEO_MAX_PEOPLE),
+      "F-52: an absurd count is clamped", "to %d" % SUP.VIDEO_MAX_PEOPLE)
+check(video_cmd("--video-max-poses", "3").count("--max-poses") == 1, "F-52: --max-poses appears once")
+check(video_cmd("--video-max-poses", "2")[:2] == video_cmd()[:2], "F-52: the command shape is otherwise unchanged")
+oak = SUP.build_arg_parser().parse_args(
+    ["--script", os.path.join(os.path.dirname(V.__file__), "..", "..", "multiperson_udp_sender.py"),
+     "--evidence-dir", os.path.join(tmp, "ev4"), "--video-max-poses", "4", "--max-poses", "2"])
+oak_cmd = SUP.Supervisor(oak).build_command()
+check(max_poses_of(oak_cmd) == "2" and "--video-max-poses" not in oak_cmd,
+      "F-52: the OAK multi-person sender still gets --max-poses from --max-poses, and never the video flag")
+
 args2 = SUP.build_arg_parser().parse_args(
     ["--script", os.path.join(os.path.dirname(V.__file__), "video_udp_sender.py"),
      "--evidence-dir", os.path.join(tmp, "ev2")])

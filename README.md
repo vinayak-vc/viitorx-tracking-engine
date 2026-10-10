@@ -297,6 +297,30 @@ set CAMERA_PIN=123456
 * The server's side of the contract (events, errors, pitfalls, a checklist for a receiver in any language) is documented in the LAN
   camera project: `lan-camera-streaming/docs/receiver-guide.md`. `lan_camera.py` is written to it and is a Python reference.
 
+#### Several people from a phone, webcam or video — `--max-poses N` (F-52)
+
+A phone, a webcam and a video file have no OAK-D, so the production crowd detector (on the OAK's VPU) is not available. `--max-poses 2`
+or more adds a **host-side person detector** (YOLOX-s, Apache-2.0, on the same GPU) and the F-32 `PersonTracker` in front of the same
+pose model, and sends the F-32 `persons[]` datagram (persons[0] is also published at the root in the single-person shape, so every
+scene consumes it unchanged).
+
+```bash
+.venv/Scripts/python.exe tools/model/fetch_yolox_s.py          # once: 35.9 MB, size and SHA-256 verified, not in version control
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video <clip|camera:0|viewer link> --max-poses 3
+```
+
+* `--max-poses 1` (default) is the old single-person path, unchanged; the detector is not even imported.
+* `--detector <onnx>` / `VIRTUAL_MIRROR_DETECTOR` choose the weights; `--det-conf` (0.45, the OAK path's value, not tuned for this
+  detector) the bar for "a person".
+* Each person costs one sequential pose solve. Measured on an RTX 3060 (decode excluded): 2 people 35.5 fps, 3 people 26.3,
+  5 people 17.5, 8 people 14.8.
+* Each person has their own z filter and P1-1 joint tracker (the single-person video chain), keyed by track id and released 3 s after the
+  track disappears. Ids are never reused: a person gone for longer than the tracker's 1.2 s hold is a new id on return.
+* Limits: no stereo (hip depth from apparent height; a person whose ankles are hidden gets 2.0 m), no F-21 ownership, ids fragment under
+  heavy occlusion.
+* **From Unity:** `AppBootstrap > Video Max People`. It reaches the sender through the supervisor's `--video-max-poses N` (forwarded as `--max-poses N`). That is
+  a separate flag from the supervisor's `--max-poses`, which is the OAK multi-person cap and is ignored by the video sender.
+
 #### Supervisor state and Unity's status lights (F-51)
 
 `sidecar_supervisor.py` writes `evidence/oak_v4/f20b/supervisor_state.json` every ~2 s. It now includes the sender's latest heartbeat, so
@@ -348,9 +372,11 @@ after the ADR-065 reorganisation:
 .venv\Scripts\python.exe tools\diagnostics27_humanized_analyze.py --selftest   # 18 passed
 
 # F-49 video source: classification, atomic bounded download, supervisor command shape.
-.venv/Scripts/python.exe tests/test_video_source.py           # 95/95
+.venv/Scripts/python.exe tests/test_video_source.py           # 105/105
 # F-51 the supervisor copies the sender's heartbeat into supervisor_state.json (`Child`), for Unity's status lights.
 .venv/Scripts/python.exe tests/test_supervisor_state.py       # 32/32
+# F-52 host-side person detector + multi-person layer (scripted networks; the real-network layer skips when the weights are absent).
+.venv/Scripts/python.exe tests/test_host_multiperson.py       # 73/73
 # F-50 LAN camera (WebRTC): 78 assertions run anywhere; set CAMERA_SERVER_DIR to the lan-camera-streaming
 # project folder and it also drives that real Node server with a fake phone (and the model, for the full chain).
 .venv/Scripts/python.exe tests/test_lan_camera.py             # 103/103 with the server, 78/78 without

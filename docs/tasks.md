@@ -5,6 +5,45 @@ Scope boundary: sensor → signal → datagram. See `../AGENTS.md` §2.
 
 ---
 
+## ✅ F-51 — the supervisor reports the sender's heartbeat (2026-10-10) — BUILT AND TESTED
+
+Report and ADR live in the Unity repo: `docs/tasks.md` F-51, **ADR-087** (Unity's five status lights consume this). No UDP wire change.
+
+- [x] `sidecar_supervisor.py`: `parse_heartbeat()` + `_child_heartbeat()`; `supervisor_state.json` gains `Child`
+      (`Frames`, `Sent`, `Skipped`, `Live`, `Note`, `LineAgeSeconds`), read from the last 4 KiB of the child's log on each ~2 s state write.
+      Works for all three senders' formats. Never raises (`Child: null` for no log / no heartbeat / a vanished log); decides nothing.
+- [x] `tests/test_supervisor_state.py`: **32/32** (video, wholebody and multiperson lines, latest wins, truncated tail, the null cases,
+      existing keys untouched, large log read from the tail). `tests/test_video_source.py` still 95/95.
+- [x] Verified through the real supervisor on a live chain: the file carried `Frames/Sent/Live` and the Unity model read it.
+
+**NOT TESTED:** a live OAK-D run (the wholebody/multiperson formats are covered from their print statements only).
+**Reminder:** `SidecarReady` is marked at the first `frames=` line, which every sender prints BEFORE loading the model — it is not "model loaded".
+
+---
+
+## ✅ F-50 — a phone over WebRTC as a frame source (2026-10-10) — BUILT, VERIFIED ON LOOPBACK ONLY
+
+Report and ADR live in the Unity repo: `docs/tasks.md` F-50, **ADR-086**. No wire change, so no ADR is needed here.
+
+- [x] `tools/video/lan_camera.py` — a UTILITY with `LatestFrameReader`'s surface; speaks the LAN Camera Streaming server's
+      protocol (`/api/config`, Socket.IO, `room:join` on every connect, a new `RTCPeerConnection` per offer, queued
+      trickle candidates, `peer:left`). Lazy imports.
+- [x] `tools/video/video_udp_sender.py` — source kind `lan` (`http(s)://host/viewer?room=ID` or `lan:<url>`), classified
+      before the generic http rule; a fatal LAN error exits 2; a frame-size change re-derives crop/intrinsics/state.
+- [x] The PIN is read from `CAMERA_PIN` only. Never in the link (a `pin=` is refused), never on a command line, never printed.
+- [x] `requirements.txt` / `requirements.lock.txt` (27 pins; `pip freeze` diffed: numpy/opencv/onnxruntime-directml/protobuf unmoved).
+- [x] `tests/test_lan_camera.py` + `tests/_lan_fake_sender.py`: **78/78** with no server, **103/103** with
+      `CAMERA_SERVER_DIR` set (real Node server, fake aiortc phone, then the real sender + model + a real clip over WebRTC).
+      Mutation-checked (5 breakages caught). `tests/test_video_source.py` still 95/95.
+- [x] Measured through the real supervisor: `SIDECAR READY`, PIN absent from command line/log/events; sender `lat` mean 23 ms
+      (excludes phone + network).
+
+**NOT TESTED:** a real phone/browser sender page, real Wi-Fi, firewall, zrok, orientation of a portrait phone, end-to-end
+latency, throughput on an unloaded machine (~20 datagrams/s here with the fake phone's encoder on the same CPU).
+`RTCPeerConnection.close()` was seen to hang (>30 s) while ICE was `checking`; bounded at 3 s, root cause unknown.
+
+---
+
 ## ✅ F-33 — per-person filter chains (2026-09-17) — BUILT AND MEASURED
 
 Report and ADR live in the Unity repo: `docs/F33_PER_PERSON_FILTERS_2026-09-17.md`, **ADR-071**.

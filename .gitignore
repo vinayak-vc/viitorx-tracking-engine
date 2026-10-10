@@ -366,3 +366,4 @@ evidence/oak_v4/f22/**/pose_events.jsonl
 # binary that any machine can re-download, and the fetch command is in multiperson_udp_sender.py's
 # error message and in the README.
 depthai_blazepose/models/person-detection-retail-0013_*.blob
+temp_SR1_f0.jpg

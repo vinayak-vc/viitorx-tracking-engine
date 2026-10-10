@@ -48,15 +48,20 @@ SOURCES (--video)
   rtsp://...  stream:<url>            a LIVE stream: an RTSP camera, or a phone "IP camera" app serving
   http://192.168.x.x:8080/video       MJPEG. An http link to a private/LAN address is read as a stream,
                                       not a page. Credentials in a link are never printed.
+  http://host/viewer?room=<id>        F-50: a LAN Camera Streaming viewer link (or lan:<url>). The phone's
+                                      browser sender page streams over WebRTC and this process joins the
+                                      room as the viewer (lan_camera.py). The access PIN is NOT part of
+                                      the link: it comes from the CAMERA_PIN environment variable.
 Only http, https, rtsp and existing local files are accepted. A URL is never passed to a shell.
 
-LIVE SOURCES (camera and stream) differ from a file in three ways, all deliberate: the newest frame is
-always the one processed (a reader thread drops what inference cannot keep up with, so latency cannot
-pile up behind a slow GPU), there is no pacing because the camera is the clock, and a lost stream is
-reopened with backoff instead of treated as "the clip ended".
+LIVE SOURCES (camera, stream and LAN camera) differ from a file in three ways, all deliberate: the
+newest frame is always the one processed (a reader thread drops what inference cannot keep up with, so
+latency cannot pile up behind a slow GPU), there is no pacing because the camera is the clock, and a lost
+source is reopened with backoff instead of treated as "the clip ended".
 
     .venv\\Scripts\\python.exe tools/video/video_udp_sender.py --video ..\\..\\video\\SR7.mp4
     .venv\\Scripts\\python.exe tools/video/video_udp_sender.py --video camera:0 --rotate 90
+    set CAMERA_PIN=123456 && .venv\\Scripts\\python.exe tools/video/video_udp_sender.py --video http://192.168.1.5:3000/viewer?room=room-abc123
     .venv\\Scripts\\python.exe tools/video/video_udp_sender.py --list-cameras
 """
 
@@ -98,6 +103,7 @@ import smoothing
 import wholebody_udp_sender as W
 import joint_tracker as JT
 import target_ownership as TO
+import lan_camera as LAN   # F-50: imports nothing heavy; aiortc & co load only when a reader starts
 
 # F-20A: a new sid is a new producer session. Stamped once per process, like the real senders.
 SESSION_ID = "vd%09x" % (uuid.uuid4().int & 0xFFFFFFFFF)
@@ -136,7 +142,8 @@ KIND_DIRECT = "direct"
 KIND_PAGE = "page"
 KIND_CAMERA = "camera"
 KIND_STREAM = "stream"
-LIVE_KINDS = (KIND_CAMERA, KIND_STREAM)
+KIND_LAN = "lan"   # F-50: a LAN Camera Streaming viewer link, received over WebRTC
+LIVE_KINDS = (KIND_CAMERA, KIND_STREAM, KIND_LAN)
 
 
 class SourceError(Exception):
@@ -180,7 +187,8 @@ def parse_camera_index(text):
 
 
 def classify_source(spec):
-    """What --video names: 'file', 'direct' (a link to a video file), 'page', 'camera' or 'stream'.
+    """What --video names: 'file', 'direct' (a link to a video file), 'page', 'camera', 'stream' or
+    'lan' (a LAN Camera Streaming viewer link, F-50).
 
     Raises SourceError for anything else - an empty string, a missing path, or a scheme that is not on
     the allowlist. Refusing `file:`, `ftp:` and friends here is deliberate: this value comes from an
@@ -201,6 +209,15 @@ def classify_source(spec):
         if parsed.scheme.lower() not in STREAM_SCHEMES or not parsed.netloc:
             raise SourceError("stream: needs an rtsp:// or http(s):// link, got '%s'" % redact(inner))
         return KIND_STREAM
+    # F-50: asked BEFORE the generic http branch below. A viewer link is an http link to a LAN address
+    # or a public tunnel, which that branch would read as an MJPEG stream or as a page for yt-dlp -
+    # both wrong, and both fail in a way that does not mention the real cause.
+    if LAN.is_lan_camera_link(text):
+        try:
+            LAN.parse_lan_url(text)
+        except LAN.LanCameraError as e:
+            raise SourceError(str(e))
+        return KIND_LAN
     parsed = urllib.parse.urlparse(text)
     scheme = parsed.scheme.lower()
     if scheme in ("rtsp", "rtsps") and parsed.netloc:
@@ -610,7 +627,19 @@ def main():
 
     reader = None
     cap = None
-    if live:
+    if live and kind == KIND_LAN:
+        # F-50. The reader owns its own reconnection (socket, room and peer connection), so it does not
+        # go through LatestFrameReader's open/read/release cycle - but it has the same surface, and
+        # everything below treats the two alike. The PIN comes from CAMERA_PIN and is never printed.
+        try:
+            reader = LAN.LanCameraReader(a.video)
+            print("[vid]   source      : LAN camera, room '%s' on %s  (LIVE, WebRTC: newest frame only, "
+                  "rejoins on loss)" % (reader.room_id, reader.base_url), flush=True)
+            reader.start()
+        except LAN.LanCameraError as e:
+            print("[vid] ERROR cannot use the LAN camera: %s" % e, flush=True)
+            return 2
+    elif live:
         if kind == KIND_CAMERA:
             cam_index = parse_camera_index(a.video)
             cam_w, cam_h = a.camera_size
@@ -694,6 +723,11 @@ def main():
             t_grab = None
             if live:
                 frame, t_grab = reader.read(HEARTBEAT_SECONDS)
+                if frame is None and getattr(reader, "fatal", None):
+                    # F-50: the LAN camera's session ended for good (the server refused a rejoin).
+                    # Exit non-zero so the supervisor reports it, instead of idling on 'no new frame'.
+                    print("[vid] ERROR the LAN camera cannot continue: %s" % reader.fatal, flush=True)
+                    return 2
                 if frame is None:
                     # Nothing new within the heartbeat interval: say so rather than go quiet, or the
                     # supervisor reads a camera that has not delivered as a hung process.
@@ -722,6 +756,15 @@ def main():
                     continue
 
             frame = orient_frame(frame, a.rotate, a.flip)
+            if ctx["w"] and (frame.shape[0], frame.shape[1]) != (ctx["h"], ctx["w"]):
+                # F-50. A WebRTC sender adapts its resolution to the bandwidth, and any live source may
+                # be reopened at another size. The crop box, the focal length and the per-person state
+                # were all derived from the FIRST frame's size, so carrying on would feed the model a
+                # crop and an intrinsic matrix for a picture that no longer exists. Re-derive them
+                # exactly as for a first frame (which also rebuilds the filters, so one frame of reset).
+                print("[vid]   frame size changed %dx%d -> %dx%d: re-deriving crop and intrinsics"
+                      % (ctx["w"], ctx["h"], frame.shape[1], frame.shape[0]), flush=True)
+                ctx["w"] = 0
             if ctx["w"] == 0:
                 ctx["h"], ctx["w"] = frame.shape[0], frame.shape[1]
                 fps = (cap.get(cv2.CAP_PROP_FPS) if cap is not None else 0.0) or 30.0

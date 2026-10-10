@@ -18,6 +18,39 @@
 
 ---
 
+## 2026-10-10 (later): THE SUPERVISOR NOW REPORTS THE SENDER'S HEARTBEAT (F-51)
+
+Unity's status lights (Unity repo: `docs/tasks.md` F-51, **ADR-087**) need to tell "alive" from "model running" from "a person found".
+`sidecar_supervisor.py` therefore copies the sender's latest `frames= sent= ...` line into `supervisor_state.json` as `Child` (fields in
+`README.md`). `tests/test_supervisor_state.py` pins it (32/32). **Carry forward:** (1) the field names are a contract with Unity — do not
+rename them without changing `SidecarStatusModel`; (2) `SidecarReady` is NOT "model loaded"; (3) the parser must never raise: it runs
+inside the watchdog.
+
+---
+
+## 2026-10-10: A PHONE CAN BE THE CAMERA, OVER WEBRTC (F-50)
+
+Report and ADR are in the **Unity repo** as usual: `docs/tasks.md` F-50, `docs/decisions.md` **ADR-086**,
+`docs/ai_handoff.md`. What changed in THIS repo:
+
+```text
+tools/video/lan_camera.py          NEW   frame source: joins a LAN Camera Streaming room as the viewer (aiortc + Socket.IO)
+tools/video/video_udp_sender.py    +     source kind `lan`; fatal-error exit; frame-size-change re-derivation
+tests/test_lan_camera.py           NEW   78/78 alone, 103/103 with CAMERA_SERVER_DIR (real Node server + model)
+tests/_lan_fake_sender.py          NEW   test helper: a fake phone built on aiortc
+requirements.txt / .lock.txt       +     aiortc, python-socketio[asyncio_client], aiohttp (+24 transitive pins)
+README.md                          +     "A phone over WebRTC" section, test line
+```
+
+**Carry forward:** (1) it is a SOURCE inside the video sender, not a second program; (2) the PIN arrives ONLY as the
+`CAMERA_PIN` environment variable — never accept it in `--video` or a flag; (3) a wrong PIN is fatal (exit 2), an occupied
+room or an unreachable server is retried; (4) `RTCPeerConnection.close()` is bounded at 3 s because it was measured hanging;
+(5) before installing anything into the venv, `pip freeze` first — this install was diffed and moved nothing.
+**Unproven:** everything involving a real phone or network (see the Unity repo's F-50 NOT DONE list).
+The LAN camera project's `docs/receiver-guide.md` documents the server's side of this contract for a receiver in any language.
+
+---
+
 ## 0. 2026-09-17: MULTI-PERSON EXISTS NOW (F-32), AND IT RUNS THE FULL FILTER CHAIN (F-33)
 
 Two features that change what this repo is. Reports and ADRs are in the **Unity repo** as usual:

@@ -113,6 +113,43 @@ FRAME_MARKER = "frames="
 
 _URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@")
 
+# F-51: Unity's status lights need to tell "the process is alive" from "the model is running" from "a person
+# is being tracked", and the supervisor is the one place that already watches the child's stdout. Every
+# sender (wholebody, multiperson, video) prints a heartbeat of the form `[tag] frames=N sent=M ...` every
+# ~2 s, where frames = source frames the loop consumed and sent = datagrams actually emitted. frames
+# moving with sent standing still is exactly "alive, source delivering, nobody found". That is all this
+# reads; it changes nothing the supervisor decides.
+HEARTBEAT_RE = re.compile(r"frames=(\d+) sent=(\d+)(?: skipped=(\d+))?")
+LIVE_RE = re.compile(r"\blive=([Yn])\b")
+#: key=value / key~value fields stripped from a heartbeat so what is left is its free-text note.
+_HEARTBEAT_FIELD_RE = re.compile(r"\S+[=~]\S*")
+
+#: How much of the end of the child's log is searched for its latest heartbeat. A heartbeat line is
+#: ~150 bytes and one is printed every 2 s, so 4 KiB holds the last dozen even with other lines mixed in.
+HEARTBEAT_TAIL_BYTES = 4096
+#: Longest note passed on. The notes in use ("loading RTMW3D ...", "waiting for frames") are far shorter.
+HEARTBEAT_NOTE_MAX = 80
+
+
+def parse_heartbeat(text):
+    """dict(Frames, Sent, Skipped, Live, Note) from the LAST `frames= sent=` line in `text`, or None.
+
+    Skipped is None when the sender does not report it; Live is 'Y', 'n' or None (only a live source
+    has it); Note is the free text after the numbers ('ready', 'loading RTMW3D ...', 'waiting for
+    frames', ''). A truncated first line of a tail read simply fails to match and is ignored.
+    """
+    for line in reversed((text or "").splitlines()):
+        m = HEARTBEAT_RE.search(line)
+        if m is None:
+            continue
+        live = LIVE_RE.search(line)
+        note = _HEARTBEAT_FIELD_RE.sub("", line[m.end():]).strip()
+        return dict(Frames=int(m.group(1)), Sent=int(m.group(2)),
+                    Skipped=int(m.group(3)) if m.group(3) is not None else None,
+                    Live=live.group(1) if live else None,
+                    Note=" ".join(note.split())[:HEARTBEAT_NOTE_MAX])
+    return None
+
 
 def redact(text):
     """`text` with any user:password@ inside a URL removed. A phone/IP-camera stream link commonly
@@ -172,6 +209,27 @@ class Supervisor(object):
         with io.open(self._events_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
 
+    def _child_heartbeat(self):
+        """The child's latest heartbeat (see parse_heartbeat) plus how long ago its log last grew, or None
+        when there is no log or no heartbeat yet. Never raises: this runs inside the watchdog, whose
+        whole job is to outlive a misbehaving child, and a status extra must not be able to end it."""
+        path = self._stdout_log_path
+        if not path:
+            return None
+        try:
+            size = os.path.getsize(path)
+            with io.open(path, "rb") as f:
+                f.seek(max(0, size - HEARTBEAT_TAIL_BYTES))
+                tail = f.read().decode("utf-8", "replace")
+            beat = parse_heartbeat(tail)
+            if beat is None:
+                return None
+            beat["LineAgeSeconds"] = round(max(0.0, time.time() - os.path.getmtime(path)), 1)
+            return beat
+        except OSError:
+            # The log was rotated or is momentarily locked; the next state write (2 s) tries again.
+            return None
+
     def write_state(self):
         uptime = 0.0
         if self.start_time and self.proc is not None and self.proc.poll() is None:
@@ -186,6 +244,8 @@ class Supervisor(object):
             BackoffSeconds=self.backoff_seconds,
             SidecarReady=self.ready,
             CurrentSessionId=self.sid,
+            # F-51: the sender's own latest heartbeat, for Unity's status lights. Null until it prints one.
+            Child=self._child_heartbeat(),
         )
         tmp = self._state_path + ".tmp"
         # Windows can transiently refuse os.replace() with WinError 5 (Access is denied) if a

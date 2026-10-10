@@ -271,6 +271,48 @@ Windows webcam; `--list-cameras` shows which indices open), or a phone "IP camer
 phone and `--flip` for a front camera; both act on the image before the model. A live source is processed newest-frame-only
 (stale frames are dropped, never queued) and reconnects on loss. Credentials in a link are never printed.
 
+#### A phone over WebRTC — the LAN Camera Streaming viewer link (F-50)
+
+`--video http://192.168.1.5:3000/viewer?room=room-abc123` (or `lan:<url>`) is a **LAN Camera Streaming** viewer link:
+the phone's browser sender page streams over WebRTC and this process joins the room as the viewer
+(`tools/video/lan_camera.py`, a utility with the same surface as `LatestFrameReader`). Nothing to install on the phone.
+
+```bash
+set CAMERA_PIN=123456
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video "http://192.168.1.5:3000/viewer?room=room-abc123" --rotate 90
+```
+
+* **The PIN is never in the link or on the command line.** It comes from the `CAMERA_PIN` environment variable
+  (Unity sets it for the sidecar it launches, from `AppBootstrap > Lan Camera Pin`). A link that carries `pin=` is refused.
+* **One viewer per room.** A browser viewer tab open in the same room blocks this reader; it keeps retrying, so closing
+  the tab is the fix. A wrong PIN, an invalid room or a media-mode mismatch ends the sender with exit code 2 and one
+  clear line (never the PIN); an unreachable server is retried forever.
+* Needs `aiortc`, `python-socketio[asyncio_client]` and `aiohttp` (in `requirements.txt` / `requirements.lock.txt`);
+  imported only when a LAN camera is used. Snapshot `pip freeze` before touching the venv: installing them was checked
+  not to move numpy, OpenCV, onnxruntime-directml or protobuf.
+* Only the newest frame is processed; a phone that changes resolution mid-stream is noticed and the crop/intrinsics are
+  re-derived. If the avatar lies sideways use `--rotate 90|270` (aiortc ignores a phone's orientation header).
+* When WebRTC cannot connect (router client isolation, firewall, a phone on another network with no TURN entry on the
+  server) the log says so with the likely causes. There is no MJPEG/tunnel fallback in this utility.
+* The server's side of the contract (events, errors, pitfalls, a checklist for a receiver in any language) is documented in the LAN
+  camera project: `lan-camera-streaming/docs/receiver-guide.md`. `lan_camera.py` is written to it and is a Python reference.
+
+#### Supervisor state and Unity's status lights (F-51)
+
+`sidecar_supervisor.py` writes `evidence/oak_v4/f20b/supervisor_state.json` every ~2 s. It now includes the sender's latest heartbeat, so
+Unity can show whether inference is running and whether anybody is being tracked without a sidecar window:
+
+```json
+{ "SupervisorState": "RUNNING", "SidecarReady": true, "RestartCount": 0, "...": "...",
+  "Child": { "Frames": 296, "Sent": 210, "Skipped": 85, "Live": "Y", "Note": "", "LineAgeSeconds": 1.7 } }
+```
+
+`Frames` = source frames the sender consumed, `Sent` = datagrams emitted (frames moving while `Sent` does not = nobody found), `Live` =
+`Y`/`n` for a live source, `Note` = the free text after the numbers (`loading RTMW3D ...`, `waiting for frames`), `LineAgeSeconds` = how long
+ago the sender's log last grew. `Child` is `null` until a heartbeat exists. **`SidecarReady` is not "model loaded"**: READY is marked at the
+first `frames=` line, which the senders print before loading the model. The Unity side (`SidecarStatusModel`, `SidecarStatusLights`) is
+the only consumer that depends on these field names; `tests/test_supervisor_state.py` pins this end.
+
 What it is not: **no stereo** (every `src` flag is 0 unless `--assume-measured`, which relabels and moves
 nothing), **no crowd** (the detector runs on the OAK-D's VPU), hip depth **estimated** from
 `--subject-height` and `--hfov`, F-21 **off** unless `--ownership`. `--depth-range MIN MAX` clamps the
@@ -307,6 +349,11 @@ after the ADR-065 reorganisation:
 
 # F-49 video source: classification, atomic bounded download, supervisor command shape.
 .venv/Scripts/python.exe tests/test_video_source.py           # 95/95
+# F-51 the supervisor copies the sender's heartbeat into supervisor_state.json (`Child`), for Unity's status lights.
+.venv/Scripts/python.exe tests/test_supervisor_state.py       # 32/32
+# F-50 LAN camera (WebRTC): 78 assertions run anywhere; set CAMERA_SERVER_DIR to the lan-camera-streaming
+# project folder and it also drives that real Node server with a fake phone (and the model, for the full chain).
+.venv/Scripts/python.exe tests/test_lan_camera.py             # 103/103 with the server, 78/78 without
 
 # Replay + adversarial against a real capture (needs a --log-dir from a session).
 .venv\Scripts\python.exe tools\diagnostics\evaluate_p1.py --dir <capture-dir>

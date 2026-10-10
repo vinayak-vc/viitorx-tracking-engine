@@ -12,3 +12,10 @@ numpy<2                  # landmark math (numpy 1.26.x matches the depthai wheel
 
 # NOTE: geaxgx/depthai_blazepose lists open3d, but this sidecar deliberately does NOT
 # import it (the --show preview draws with cv2 directly), so open3d is omitted here.
+
+# --- F-50: LAN camera over WebRTC (tools/video/lan_camera.py) ---
+# Receives a phone's camera from the LAN Camera Streaming server. Imported lazily, so every other source
+# works without them. Exact transitive pins are in requirements.lock.txt.
+aiortc>=1.15,<2          # WebRTC peer connection (pulls in av/PyAV, cryptography)
+python-socketio[asyncio_client]>=5.17,<6   # Socket.IO v4 client for the signaling server (pulls in aiohttp)
+aiohttp>=3.14,<4         # /api/config fetch

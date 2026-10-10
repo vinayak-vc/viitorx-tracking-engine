@@ -326,6 +326,38 @@ scene consumes it unchanged).
 * **From Unity:** `AppBootstrap > Video Max People`. It reaches the sender through the supervisor's `--video-max-poses N` (forwarded as `--max-poses N`). That is
   a separate flag from the supervisor's `--max-poses`, which is the OAK multi-person cap and is ignored by the video sender.
 
+#### Camera setup and tips for better results (a phone, webcam, USB camera or video)
+
+What follows is split into what was **measured** (with the numbers) and what is **general advice that was not measured here**; the difference is marked.
+
+**1. Resolution does not change how fast the pose runs - 1080p or 720p is plenty.** *(measured)* The detector sees a 640 px picture and the pose model a fixed 288x384 crop around each person, cut from the original pixels.
+The same two-person clip at native 4K, 1920 wide and 1280 wide took 29.6 / 29.2 / 29.4 ms per frame and gave identical joints (21.0) and jitter (8.5 / 8.4 / 8.5 mm). So a higher-resolution camera does not make
+inference slower - and a lower one does not make it faster. A 720p camera gives the same frame rate as a 1080p one; an 8K one would only add bandwidth, decoding and memory (~100 MB a frame) for nothing the pose stage can use.
+
+**2. Where resolution DOES cost something is getting the frames to the model.** *(measured for files)* Decoding a 4K VP9 **file** took 33 ms a frame (spikes to ~150 ms) against 3.3 ms for the same clip at 1080p, and capped playback near 24 fps on this
+machine, so it played in slow motion (0.62x live in Unity). A live USB camera sends frames in its own format, so that figure does not carry over - **a 4K USB camera was not measured** - but it would still need more USB bandwidth and decoding than the pose stage can use.
+Set the camera to **1080p (or 720p)**. A 4K FILE should be re-encoded to 1080p first (`ffmpeg -i in.webm -vf scale=1920:1080 -c:v libx264 -crf 20 -an out.mp4`); the sender says so (`WARNING the clip is advancing at 0.69x ...`) when decoding is the limit.
+
+**3. What actually sets the frame rate is GPU time per person.** *(measured, RTX 3060, FP16 model)* About 9 ms a person standalone and 10-15 ms while Unity is rendering. Two people: ~35 fps standalone, ~25 fps live in Unity; three people: ~26 fps standalone; five: ~17.
+The heartbeat's `speed=` shows whether a FILE is keeping up (1.00 = real time). To go faster: fewer people (`Video Max People` = the number really there), a lighter Unity (a built player rather than the Editor; close other GPU programs), and the FP16 model (automatic when `rtmw3d-x-fp16.onnx` is present).
+
+**4. A 60 fps camera will not give 60 fps of skeleton.** *(reasoned from the measurements above)* A live source processes only the newest frame and discards the rest, and two people cost ~28-40 ms a frame, so the output stays at roughly 25-35 fps whatever the camera delivers. 60 fps still helps in two ways: the newest frame
+is at most ~16 ms old instead of ~33 ms (less latency), and cameras usually use a shorter exposure at 60 fps, which means less motion blur on fast moves *(general knowledge, not measured here)*. It needs good light.
+
+**5. Framing matters more than resolution.**
+* **Whole body in view, hips and ankles included.** A person is only posed when both hips are confident; hip DEPTH is estimated from the nose-to-ankle span, so a person for whom fewer than two of {nose, ankles} are visible falls back to 2.0 m and sits at the wrong distance *(from the code; seen on the occluded back row of the 8-dancer clip)*.
+* **Big enough in the picture:** the pose crop is 384 px tall, so a person at least ~400 px tall (about 37% of the frame height at 1080p) loses nothing. A ~170 px person (the same clip at 288x512) cost +12% jitter *(measured)*; anything much smaller is stretched and loses detail.
+* **Do not stack people.** Heavy overlap is what splits identities: on the 8-dancer clip the tracker used 12 ids for 8 people; two dancers side by side kept exactly 2 ids over 1,934 frames *(measured)*. Ids are never reused, so a person gone for over ~1.2 s returns as a new id.
+* **A fixed, level camera at about hip or chest height**, landscape for 2-3 people side by side. Level it if you can: a tilted mount distorts the geometry (the `Camera Tilt Degrees` setting was built for the OAK-D's stereo depth; whether it helps a monocular source was not checked).
+* **Clothing that contrasts with the background** and nobody standing in front of a busy pattern *(general advice)*.
+
+**6. Camera settings** *(general advice)*: MJPEG over USB 3; **fixed exposure and fixed focus** (auto-exposure and autofocus make the picture pump and hunt while someone dances); even lighting; a fast shutter for dance; the lens's real horizontal field of view.
+
+**7. Unity fields that change the result.** `Video Max People` (the real count); `Video Horizontal Fov Degrees` (the camera's actual horizontal FOV - it scales the pose, default 60); `Video Subject Height Metres` (sets the estimated distance, default 1.7); `Video Rotate Degrees` / `Video Flip Horizontal` for a sideways phone or a selfie camera;
+`Video Camera Size` 1920x1080 (or 1280x720).
+
+**8. Known limits that are not a camera problem.** No stereo, so depth is estimated per person; no F-21 ownership; the crowd scenes fed this way have not been checked by me on a screen; two or three REAL people from a real camera have not been recorded yet (the 2-person evidence is `147.webm`).
+
 #### Supervisor state and Unity's status lights (F-51)
 
 `sidecar_supervisor.py` writes `evidence/oak_v4/f20b/supervisor_state.json` every ~2 s. It now includes the sender's latest heartbeat, so

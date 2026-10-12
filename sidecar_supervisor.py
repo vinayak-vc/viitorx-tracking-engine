@@ -396,6 +396,10 @@ class Supervisor(object):
                 cmd += ["--auto-orient"]
             if self.args.video_hfov_axis != "width":
                 cmd += ["--hfov-axis", self.args.video_hfov_axis]
+            # F-60. ON in the sender by default, so only the opt-out is forwarded and the default command
+            # line is the F-57 one, unchanged.
+            if not self.args.video_partial_body:
+                cmd += ["--no-partial-body"]
             if self.args.video_camera_size:
                 cmd += ["--camera-size", str(self.args.video_camera_size[0]),
                         str(self.args.video_camera_size[1])]
@@ -719,6 +723,10 @@ def build_arg_parser():
     ap.add_argument("--video-hfov-axis", choices=["width", "long"], default="width",
                      help="F-57: which side --video-hfov spans: the delivered width (default, F-49) or the "
                           "longer side, so a phone keeps one focal length in portrait and landscape")
+    ap.add_argument("--video-partial-body", action=argparse.BooleanOptionalAction, default=True,
+                     help="F-60: the VIDEO sender copes with a body the frame cuts off (a laptop webcam): "
+                          "hips, then shoulders, then the nose anchor the skeleton. ON by default; "
+                          "--no-video-partial-body is forwarded as --no-partial-body (the F-49 hip gate)")
     ap.add_argument("--video-flip", action="store_true",
                      help="F-49: mirror each frame horizontally before inference (a front camera)")
     ap.add_argument("--video-camera-size", type=int, nargs=2, default=None, metavar=("W", "H"),

@@ -18,6 +18,14 @@
 
 ---
 
+## 2026-10-12: A BODY THE CAMERA CUTS OFF (F-60)
+
+`framing.py` anchors the skeleton on the hips while they are in the picture, then the shoulders, then the nose, per person and per frame, and puts the tier in the datagram as `fr` (0/1/2, absent = hips). Below tier 0 the root and its depth are ESTIMATES (shoulder frame + a hip offset learned from this person; shoulder / face width learned in metres from the last measured depth); a joint outside the image is sent as absent; nothing below the hips is invented. `--no-partial-body` is the old hip gate. Full numbers, thresholds and the DO-NOT list: Unity repo `docs/decisions.md` **ADR-096**; the measurement: `tools/video/f60_partial_body_eval.py`.
+**What the measurement overturned:** RTMW3D does NOT go quiet when the hips leave the picture; it reports them (and knees, wrists) at >= 0.3 outside the image, and the old path sent that plus a fixed 2.0 m depth.
+**Carry forward:** `--depth-range` bounds only the height rule and the default; the 5% entry margin and the 0.8-torso ankle rule are there for measured failures (flapping; a 6 m depth) - do not remove them without re-running the tool; `host_multiperson.HostMultiPerson` defaults `partial_body=False` on purpose; not run on a physical webcam.
+
+---
+
 ## 2026-10-12: AUTO ORIENT FOR A PHONE / WEBCAM / VIDEO (F-57)
 
 `--auto-orient` picks the rotation by scoring the four rotations (detector x pose x "reads upright") on a few frames and re-does it when the frame size changes; `--hfov-axis long` makes one phone have one focal length in portrait and landscape. Off by default. Details and numbers: Unity repo `docs/decisions.md` ADR-093; module header of `tools/video/frame_orientation.py`.

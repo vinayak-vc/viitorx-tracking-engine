@@ -22,16 +22,20 @@ the single-person shape, so every Unity scene consumes this sender unchanged. It
 by --sway-gain exactly as video_udp_sender scales it, so a scene sees the same root motion whether one
 or several people are being tracked.
 
-KNOWN LIMITS, stated rather than hidden: hip depth comes from nose-to-ankle span, so a person whose
-ankles are hidden (a back-row dancer) falls back to the 2.0 m default and sits at the wrong distance;
-there is no ownership layer (F-21 is superseded for multi-person, see person_tracker.py); and N people
-cost N sequential pose solves.
+KNOWN LIMITS, stated rather than hidden: with partial_body OFF (the F-52 rule) hip depth comes from
+nose-to-ankle span, so a person whose ankles are hidden (a back-row dancer) falls back to the 2.0 m default
+and sits at the wrong distance, and a person without confident hips is not sent at all. With partial_body ON
+(F-60, what the sender passes by default) each person carries a framing.FramingTracker: the hips anchor the
+skeleton while they are in the picture, then the shoulders, then the nose, and depth comes from the shoulder or
+face width when there are no ankles. There is no ownership layer (F-21 is superseded for multi-person, see
+person_tracker.py); and N people cost N sequential pose solves.
 """
 
 import time
 
 import numpy as np
 
+import framing as FR
 import joint_tracker as JT
 import multiperson_udp_sender as MP
 import person_tracker as PT
@@ -48,13 +52,16 @@ STATE_IDLE_SECONDS = 3.0
 class PersonState:
     """The temporal memory one tracked person carries: a z filter per keypoint and P1-1's joint trust."""
 
-    __slots__ = ("zfilt", "skel", "last_seen")
+    __slots__ = ("zfilt", "skel", "last_seen", "framing", "conf_buf")
 
-    def __init__(self, src_fps, now):
+    def __init__(self, src_fps, now, framing=None):
         # min_cutoff 0.5 / beta 0.4 are production's trunk parameters, as in video_udp_sender.
         self.zfilt = [smoothing.OneEuro(freq=src_fps, min_cutoff=0.5, beta=0.4) for _ in range(133)]
         self.skel = JT.SkeletonTracker()
         self.last_seen = now
+        #: F-60: this person's framing memory (the hip offset and body widths learned from THEM), or None.
+        self.framing = framing
+        self.conf_buf = np.zeros(133, dtype=np.float32) if framing is not None else None
 
 
 class HostMultiPerson:
@@ -62,8 +69,9 @@ class HostMultiPerson:
 
     def __init__(self, model, detector, hip_depth_fn, session_id, conf=0.3, max_poses=3,
                  subject_height=1.70, depth_range=None, smooth_zrel=True, sway_gain=0.45,
-                 flatten_trunk=False, assume_measured=False, src_fps=30.0):
+                 flatten_trunk=False, assume_measured=False, src_fps=30.0, partial_body=False):
         self.model = model
+        self.partial_body = partial_body
         self.detector = detector
         self.hip_depth_fn = hip_depth_fn
         self.session_id = session_id
@@ -102,7 +110,8 @@ class HostMultiPerson:
     def _state_for(self, track_id, now):
         st = self.states.get(track_id)
         if st is None:
-            st = PersonState(self.src_fps, now)
+            framing = FR.FramingTracker(self.conf, self.subject_height, W.ZREL_SIGN) if self.partial_body else None
+            st = PersonState(self.src_fps, now, framing)
             self.states[track_id] = st
         st.last_seen = now
         return st
@@ -122,16 +131,33 @@ class HostMultiPerson:
         t0 = time.perf_counter()
         uv, zrel, conf = self.model.infer(frame, bbox)
         pose_ms = (time.perf_counter() - t0) * 1000.0
-        if conf[11] < self.conf or conf[12] < self.conf:
-            return None, pose_ms
-        state = self._state_for(track.id, now)
-
-        hip_z = self.hip_depth_fn(uv, conf, self.conf, self.subject_height, fy, self.depth_range)
+        anchor = None
+        if self.partial_body:
+            # F-60: this person's own framing memory decides the anchor; a person with no hips is still
+            # posed from the shoulders or the nose, and only a frame with not even a head is dropped.
+            state = self._state_for(track.id, now)
+            anchor = state.framing.update(uv, conf, zrel, intr, (w, h), self.depth_range, now)
+            event = state.framing.take_event()
+            if event:
+                print("[vid]   person %d framing: %s" % (track.id, event), flush=True)
+            if anchor is None:
+                return None, pose_ms
+            conf = state.framing.mask_outside(uv, conf, (w, h), state.conf_buf)
+            hip_z = anchor.hip_z
+            hip_uv = (anchor.hip_u, anchor.hip_v)
+        else:
+            if conf[11] < self.conf or conf[12] < self.conf:
+                return None, pose_ms
+            state = self._state_for(track.id, now)
+            hip_z = self.hip_depth_fn(uv, conf, self.conf, self.subject_height, fy, self.depth_range)
+            hip_uv = 0.5 * (uv[11] + uv[12])
         if self.smooth_zrel:
             zrel = np.array([state.zfilt[i].filter(float(zrel[i])) for i in range(len(zrel))],
                             dtype=np.float32)
-        zrel_hip = 0.5 * (float(zrel[11]) + float(zrel[12]))
-        hip_uv = 0.5 * (uv[11] + uv[12])
+        if anchor is not None:
+            zrel_hip = state.framing.zrel_hip(zrel)
+        else:
+            zrel_hip = 0.5 * (float(zrel[11]) + float(zrel[12]))
         mid_hip = np.array([(hip_uv[0] - intr[2]) * hip_z / fx,
                             (hip_uv[1] - intr[3]) * hip_z / fy, hip_z], dtype=np.float32)
 
@@ -165,6 +191,8 @@ class HostMultiPerson:
             "st": W.build_joint_states(track_res),
             "state": track.state,
         }
+        if anchor is not None:
+            person["fr"] = anchor.tier
         if lh is not None:
             person["lh"] = lh
         if rh is not None:
@@ -220,6 +248,8 @@ class HostMultiPerson:
             "lat": round((time.time() - t_frame) * 1000.0, 1),
         }
         MP.add_legacy_primary(message, persons)
+        if "fr" in persons[0]:
+            message["fr"] = persons[0]["fr"]
         # The root keeps the single-person shape AND scale: lateral/vertical sway is damped by
         # --sway-gain exactly as video_udp_sender does, z is never scaled.
         x, y, z = persons[0]["xyz"]

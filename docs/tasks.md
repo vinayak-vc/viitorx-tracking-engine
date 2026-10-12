@@ -5,6 +5,19 @@ Scope boundary: sensor → signal → datagram. See `../AGENTS.md` §2.
 
 ---
 
+## ✅ F-60 — a body the camera cuts off: hips, then shoulders, then the nose (2026-10-12) — BUILT, MEASURED ON RECORDINGS
+
+Unity repo: `docs/tasks.md` F-60, `docs/decisions.md` **ADR-096** (numbers, thresholds, DO-NOT list). Wire: one additive field, `fr`.
+
+- [x] `tools/video/framing.py`: `FramingTracker`, one per person: hips -> shoulders -> nose chosen every frame (hysteresis, 5% edge-entry margin), learned hip offset and body widths, depth cascade (height -> shoulders -> face -> 2.0 m, widths learned from the last measured depth, rise <= 40%/s), `mask_outside` (a joint outside the image is sent as absent), `zrel_hip`.
+- [x] `video_udp_sender.py --partial-body / --no-partial-body` (default on), `host_multiperson.py` (`partial_body`, default OFF in the class so the F-52 tests are untouched; the sender passes the flag), `sidecar_supervisor.py --video-partial-body`.
+- [x] `tests/test_framing.py` 72/72 (18 mutations caught); all 13 other test files unchanged and green.
+- [x] `tools/video/f60_partial_body_eval.py capture|eval|midrun`: the measurement behind ADR-096 (needs a clip with a full body, the model and the detector).
+- [x] Auto-orient (F-57) re-measured on waist/chest/shoulders crops: upright rotation wins 29-30 of 30.
+- [ ] NOT TESTED: a physical webcam, a seated user, the laptop's real field of view (`--hfov`), a phone in portrait with only the upper body in view.
+
+---
+
 ## ✅ F-57 — auto orient: portrait / landscape / sideways for a phone, webcam or video (2026-10-12) — BUILT, MEASURED ON RECORDINGS
 
 Unity repo: `docs/tasks.md` F-57, `docs/decisions.md` **ADR-093** (numbers, thresholds, DO-NOT list).

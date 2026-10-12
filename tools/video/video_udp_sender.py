@@ -31,6 +31,12 @@ WHAT IS NOT, and the whole caveat
     and --hfov. It scales the scene; it does not invent articulation. It also decides whether the
     F-48 operating volume says TOO CLOSE: a close-up clip legitimately reads near. Change
     --subject-height or --depth-range to move a clip in or out of the volume.
+  * A BODY THE FRAME CUTS OFF (F-60, --partial-body, on by default). A laptop webcam shows the head and
+    shoulders, not the hips. framing.py decides frame by frame which body part anchors the skeleton - hips,
+    then shoulders, then the nose - and the datagram says which (`fr`: 0 hips, 1 shoulders, 2 head). Below
+    tier 0 the root is ESTIMATED, a joint outside the image is sent as absent, and the depth comes from the
+    shoulder or face width instead of nose-to-ankle height. --no-partial-body restores the F-49 rule: no
+    hips, no frame.
   * MULTI-PERSON IS OPT-IN (F-52, --max-poses 2 or more). By default this is the single-person
     pipeline: ONE crop, no detector, and with several people in frame it follows whoever the crop starts
     on. --max-poses N runs a host-side YOLOX-s person detector and the F-32 tracker in front of the
@@ -109,6 +115,7 @@ import joint_tracker as JT
 import target_ownership as TO
 import lan_camera as LAN   # F-50: imports nothing heavy; aiortc & co load only when a reader starts
 import frame_orientation as FO   # F-57: imports only cv2/numpy; the detector stack loads only with --auto-orient
+import framing as FR   # F-60: pure python; which body part anchors the skeleton (hips, shoulders, head)
 
 # F-20A: a new sid is a new producer session. Stamped once per process, like the real senders.
 SESSION_ID = "vd%09x" % (uuid.uuid4().int & 0xFFFFFFFFF)
@@ -758,7 +765,9 @@ def main():
                          "whether the F-48 operating volume calls the clip too close.")
     ap.add_argument("--depth-range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                     help="clamp the estimated hip depth to this band, metres. Off by default so the "
-                         "operating volume can be exercised by a clip's own framing.")
+                         "operating volume can be exercised by a clip's own framing. With --partial-body it "
+                         "bounds only the depth taken from the body's HEIGHT (a full body in frame): a depth "
+                         "measured from the shoulder or face width (a webcam) keeps its own 0.25-6 m band.")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
                     help="rotate each frame clockwise before inference (a portrait phone)")
     ap.add_argument("--auto-orient", action=argparse.BooleanOptionalAction, default=False,
@@ -773,6 +782,12 @@ def main():
                          "delivered width, so a phone turned to portrait changes the focal length. 'long': "
                          "the LONGER side, so the same lens gives the same focal length in portrait and "
                          "landscape.")
+    ap.add_argument("--partial-body", action=argparse.BooleanOptionalAction, default=True,
+                    help="F-60: work with a body the frame cuts off (a laptop webcam: head and shoulders). "
+                         "Each frame is anchored by the hips if they are in the picture, else by the shoulders, "
+                         "else by the nose, and the datagram's `fr` field says which. A joint outside the image "
+                         "is sent as absent; depth comes from the shoulder or face width when there are no "
+                         "ankles. --no-partial-body is the F-49 rule: both hips confident or the frame is dropped.")
     ap.add_argument("--flip", action=argparse.BooleanOptionalAction, default=False,
                     help="mirror each frame horizontally before inference (a front camera)")
     ap.add_argument("--camera-size", type=int, nargs=2, default=(1280, 720), metavar=("W", "H"),
@@ -927,7 +942,7 @@ def main():
                                     max_poses=a.max_poses, subject_height=a.subject_height,
                                     depth_range=a.depth_range, smooth_zrel=a.smooth_zrel,
                                     sway_gain=a.sway_gain, flatten_trunk=a.flatten_trunk,
-                                    assume_measured=a.assume_measured)
+                                    assume_measured=a.assume_measured, partial_body=a.partial_body)
         print("[vid]   multi-person: up to %d people, detector %s, conf %.2f"
               % (a.max_poses, detector.describe(), a.det_conf), flush=True)
 
@@ -981,6 +996,8 @@ def main():
             extra += " " + multi.summary()
         if auto is not None:
             extra += " " + auto.describe()
+        if ctx["state"] is not None and ctx["state"]["framing"] is not None and multi is None:
+            extra += " anchor(hips/shoulders/head)=%s" % ctx["state"]["framing"].summary()
         print("[vid] frames=%d sent=%d skipped=%d fps~%.1f replay=%d%s %s"
               % (frames, sent, skipped, sent / el, replay, extra, note), flush=True)
 
@@ -992,6 +1009,9 @@ def main():
             "skel": JT.SkeletonTracker(),
             "own": TO.TargetOwnership(TO.OwnershipConfig()) if a.ownership else None,
             "bbox": R.center_bbox(ctx["w"], ctx["h"]),
+            # F-60: None is the F-49 hip gate, unchanged.
+            "framing": FR.FramingTracker(a.conf, a.subject_height, W.ZREL_SIGN) if a.partial_body else None,
+            "conf_buf": np.zeros(133, dtype=np.float32),
         }
 
     heartbeat("ready")
@@ -1147,10 +1167,24 @@ def main():
                 continue
 
             uv, zrel, conf = model.infer(frame, state["bbox"])
+            # F-60. Which body part anchors this frame. Judged on the model's raw confidences, then the ones
+            # outside the image are zeroed, so the crop below, the trust states and the datagram all see the
+            # body that is actually in the picture (the model answers for the rest at full confidence).
+            framing = state["framing"]
+            anchor = framing.update(uv, conf, zrel, intr, (w, h), a.depth_range, now) if framing is not None else None
+            if anchor is not None:
+                conf = framing.mask_outside(uv, conf, (w, h), state["conf_buf"])
+            if framing is not None:
+                event = framing.take_event()
+                if event:
+                    print("[vid]   framing: %s" % event, flush=True)
             # production M15 crop refinement, same blend as the live sender
             refined = R.bbox_from_keypoints(uv, conf, w, h, thr=a.conf)
             body_conf = float(np.mean([conf[i] for i in R.COCO17_TO_JOINTID]))
-            if refined is not None and body_conf >= a.conf:
+            # A body cut off by the frame has low-confidence legs, which drag the mean under --conf while the
+            # half that is in the picture is solid: for tiers 0 and 1 the tracker's own verdict counts instead.
+            found = body_conf >= a.conf or (anchor is not None and anchor.tier <= FR.TIER_SHOULDERS)
+            if refined is not None and found:
                 state["bbox"] = tuple(0.7 * np.array(state["bbox"]) + 0.3 * np.array(refined))
             else:
                 # F-57: lost. The centred 3:4 crop is the F-49 fallback; with the detector loaded
@@ -1159,15 +1193,22 @@ def main():
                 seeded = FO.seed_bbox(seed_detector, frame) if seed_detector is not None else None
                 state["bbox"] = seeded if seeded is not None else R.center_bbox(w, h)
 
-            if conf[11] < a.conf or conf[12] < a.conf:
-                skipped += 1
-                continue
-            hip_z = estimate_hip_depth(uv, conf, a.conf, a.subject_height, fy, a.depth_range)
+            if framing is not None:
+                if anchor is None:
+                    skipped += 1
+                    continue
+                hip_z = anchor.hip_z
+                hip_uv = (anchor.hip_u, anchor.hip_v)
+            else:
+                if conf[11] < a.conf or conf[12] < a.conf:
+                    skipped += 1
+                    continue
+                hip_z = estimate_hip_depth(uv, conf, a.conf, a.subject_height, fy, a.depth_range)
+                hip_uv = 0.5 * (uv[11] + uv[12])
             if a.smooth_zrel:
                 zrel = np.array([state["zfilt"][i].filter(float(zrel[i])) for i in range(len(zrel))],
                                 dtype=np.float32)
-            zrel_hip = 0.5 * (float(zrel[11]) + float(zrel[12]))
-            hip_uv = 0.5 * (uv[11] + uv[12])
+            zrel_hip = framing.zrel_hip(zrel) if framing is not None else 0.5 * (float(zrel[11]) + float(zrel[12]))
             mid_hip = np.array([(hip_uv[0] - intr[2]) * hip_z / fx,
                                 (hip_uv[1] - intr[3]) * hip_z / fy, hip_z], dtype=np.float32)
 
@@ -1216,6 +1257,8 @@ def main():
                    "seq": seq, "sid": SESSION_ID, "t": round(time.time(), 4),
                    "st": W.build_joint_states(track_res),
                    "lat": round((time.time() - t_frame) * 1000.0, 1)}
+            if anchor is not None:
+                msg["fr"] = anchor.tier
             if own_state is not None:
                 msg["own"] = own_state
             if lh is not None:

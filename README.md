@@ -323,6 +323,26 @@ upright, sideways or upside down. `--rotate` is a fixed number; `--auto-orient` 
   `--max-poses` already loads it; the detector is shared, not loaded twice. Off (the default) imports nothing new.
 * Not for the OAK-D senders: they have their own `--portrait` / `--portrait-dir` (F-19) because the camera's mount is known.
 
+#### A body the frame cuts off — `--partial-body` (F-60)
+
+A laptop webcam shows the head and shoulders. The hips are not in the picture, and RTMW3D keeps answering for them anyway (hips at
+confidence 0.6 on the image border, wrists and knees below the edge at >= 0.3), so a confidence gate cannot tell a hip that is seen
+from one that is imagined. `--partial-body` (on by default; `--no-partial-body` is the old gate) decides it from the picture:
+
+* **The anchor, every frame, per person.** Both hips in the picture -> tier 0 (the root is the measured mid-hip, exactly as before).
+  Else both shoulders -> tier 1 (the root is ESTIMATED from the shoulder line and a hip offset learned from this person while their
+  hips were visible). Else the nose and a face width -> tier 2. Nothing -> the frame is dropped. It works in the middle of a run: a
+  person who leans over a desk falls to tier 1 and back with no restart. Hips need to be 5% clear of the picture's edge to start
+  counting (a hip on the border is the model's biased guess and flaps the tier), and leave only when they are outside it.
+* **On the wire:** `fr` = 0 / 1 / 2 (per person and at the root; absent = hips). Below tier 0 the hip joints and everything under them
+  are sent as absent (`[0,0,0,0]`), never invented; so is any joint outside the image, in every tier.
+* **Depth** is the first rule the frame supports: height (nose to ankle, with the hips in view and each ankle >= 0.8 torso below them) ->
+  shoulder width -> face width -> 2.0 m. The widths are learned in metres from the last measured depth, so the depth continues when the
+  hips go; a depth from a width may rise at most 40% a second (turning only ever makes a person look farther). `--depth-range` bounds
+  only the height rule and the default, so a webcam at 0.6 m is not pinned to Unity's 1.6 m.
+* **Measure it:** `tools/video/f60_partial_body_eval.py capture|eval|midrun` (needs a clip with a full body). Numbers: Unity repo
+  `docs/decisions.md` ADR-096. Not run on a physical webcam.
+
 #### Several people from a phone, webcam or video — `--max-poses N` (F-52)
 
 A phone, a webcam and a video file have no OAK-D, so the production crowd detector (on the OAK's VPU) is not available. `--max-poses 2`
@@ -440,6 +460,8 @@ after the ADR-065 reorganisation:
 .venv/Scripts/python.exe tests/test_supervisor_state.py       # 32/32
 # F-52 host-side person detector + multi-person layer (scripted networks; the real-network layer skips when the weights are absent).
 .venv/Scripts/python.exe tests/test_host_multiperson.py       # 73/73
+# F-60 a body the frame cuts off: framing.py (the tiers, the learned offsets, depth, masking) + its wiring into both senders.
+.venv/Scripts/python.exe tests/test_framing.py                # 72/72
 # F-50 LAN camera (WebRTC): 78 assertions run anywhere; set CAMERA_SERVER_DIR to the lan-camera-streaming
 # project folder and it also drives that real Node server with a fake phone (and the model, for the full chain).
 .venv/Scripts/python.exe tests/test_lan_camera.py             # 103/103 with the server, 78/78 without
@@ -493,7 +515,9 @@ Local UDP, default `127.0.0.1:8899`, one JSON datagram per frame:
   "t":   1788846511.0234,            // send epoch seconds
   "st":  [-1..4, ...33],             // F-29 trust channel: P1-1/P1-4 state per joint
   "own": "LOCKED",                   // F-29: F-21 ownership state  (OMITTED under --no-ownership)
-  "lat": 41.3 }                      // F-29: measured camera->payload latency, ms
+  "lat": 41.3,                       // F-29: measured camera->payload latency, ms
+  "fr":  0 }                         // F-60: what anchored the root: 0 hips (measured), 1 shoulders, 2 nose (estimated).
+                                     //       ABSENT = hips (OAK-D senders, anything older). Video senders only.
 ```
 
 **Feet are inside `lm`, not a separate field.** `build_body_landmarks` emits `FOOT_TO_JOINTID`
@@ -537,6 +561,7 @@ host GPU  : RTMW3D per tracked person, N capped by --max-poses    <- 20.7 ms eac
                  "xyz": [hipX,hipY,hipZ],
                  "src": [0|1 x33],
                  "st":  [-1..4 x33],
+                 "fr":  0,                 // F-60, see above (video senders only)
                  "lh":  [...], "rh": [...] },  ... ],
   "n": 3,          // people posed this frame
   "ndet": 5,       // people the DETECTOR saw - can exceed n, the GPU budget is the limit

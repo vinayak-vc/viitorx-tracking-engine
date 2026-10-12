@@ -392,6 +392,10 @@ class Supervisor(object):
                 cmd += ["--rotate", str(self.args.video_rotate)]
             if self.args.video_flip:
                 cmd += ["--flip"]
+            if self.args.video_auto_orient:
+                cmd += ["--auto-orient"]
+            if self.args.video_hfov_axis != "width":
+                cmd += ["--hfov-axis", self.args.video_hfov_axis]
             if self.args.video_camera_size:
                 cmd += ["--camera-size", str(self.args.video_camera_size[0]),
                         str(self.args.video_camera_size[1])]
@@ -709,6 +713,12 @@ def build_arg_parser():
                      help="F-49: clamp the estimated hip depth to this band, metres")
     ap.add_argument("--video-rotate", type=int, default=0, choices=[0, 90, 180, 270],
                      help="F-49: rotate each frame clockwise before inference (a portrait phone)")
+    ap.add_argument("--video-auto-orient", action="store_true",
+                     help="F-57: the VIDEO sender finds which way is up itself (forwarded as --auto-orient); "
+                          "--video-rotate is then only its starting guess")
+    ap.add_argument("--video-hfov-axis", choices=["width", "long"], default="width",
+                     help="F-57: which side --video-hfov spans: the delivered width (default, F-49) or the "
+                          "longer side, so a phone keeps one focal length in portrait and landscape")
     ap.add_argument("--video-flip", action="store_true",
                      help="F-49: mirror each frame horizontally before inference (a front camera)")
     ap.add_argument("--video-camera-size", type=int, nargs=2, default=None, metavar=("W", "H"),

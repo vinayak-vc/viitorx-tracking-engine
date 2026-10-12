@@ -108,6 +108,7 @@ import wholebody_udp_sender as W
 import joint_tracker as JT
 import target_ownership as TO
 import lan_camera as LAN   # F-50: imports nothing heavy; aiortc & co load only when a reader starts
+import frame_orientation as FO   # F-57: imports only cv2/numpy; the detector stack loads only with --auto-orient
 
 # F-20A: a new sid is a new producer session. Stamped once per process, like the real senders.
 SESSION_ID = "vd%09x" % (uuid.uuid4().int & 0xFFFFFFFFF)
@@ -760,6 +761,18 @@ def main():
                          "operating volume can be exercised by a clip's own framing.")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
                     help="rotate each frame clockwise before inference (a portrait phone)")
+    ap.add_argument("--auto-orient", action=argparse.BooleanOptionalAction, default=False,
+                    help="F-57: find which way is up in each frame instead of trusting --rotate. Runs the "
+                         "person detector and pose model on the four rotations at the start, whenever the "
+                         "frame size changes (a phone turned between portrait and landscape) and while "
+                         "nothing is being emitted, and applies the winner. --rotate is then only the "
+                         "starting guess and the fallback. Needs the detector weights "
+                         "(tools/model/fetch_yolox_s.py); without them it warns and keeps --rotate.")
+    ap.add_argument("--hfov-axis", choices=["width", "long"], default="width",
+                    help="F-57: which side of the frame --hfov spans. 'width' (default, the F-49 rule): the "
+                         "delivered width, so a phone turned to portrait changes the focal length. 'long': "
+                         "the LONGER side, so the same lens gives the same focal length in portrait and "
+                         "landscape.")
     ap.add_argument("--flip", action=argparse.BooleanOptionalAction, default=False,
                     help="mirror each frame horizontally before inference (a front camera)")
     ap.add_argument("--camera-size", type=int, nargs=2, default=(1280, 720), metavar=("W", "H"),
@@ -872,7 +885,10 @@ def main():
             return 2
         print("[vid]   source      : %s%s" % (path, "  (decoding ahead on its own thread)"
                                               if isinstance(cap, PrefetchCapture) else ""), flush=True)
-    print("[vid]   orientation : rotate %d deg, %s" % (a.rotate, "mirrored" if a.flip else "not mirrored"),
+    print("[vid]   orientation : rotate %d deg%s, %s, hfov %.0f deg across the %s"
+          % (a.rotate, " (start guess; --auto-orient decides)" if a.auto_orient else "",
+             "mirrored" if a.flip else "not mirrored", a.hfov,
+             "longer side" if a.hfov_axis == "long" else "delivered width"),
           flush=True)
     print("[vid]   depth       : estimated from subject height %.2f m%s   src flags: %s"
           % (a.subject_height,
@@ -915,6 +931,26 @@ def main():
         print("[vid]   multi-person: up to %d people, detector %s, conf %.2f"
               % (a.max_poses, detector.describe(), a.det_conf), flush=True)
 
+    # F-57. The probe needs a person detector whether or not several people are tracked: reuse the
+    # multi-person one when it is loaded, otherwise load it here (and only here).
+    auto = None
+    seed_detector = None
+    if a.auto_orient:
+        seed_detector = multi.detector if multi is not None else None
+        if seed_detector is None:
+            import host_person_detector as HPD
+            try:
+                with LoadTicker("loading the person detector for --auto-orient ..."):
+                    seed_detector = HPD.HostPersonDetector(a.detector, conf=a.det_conf)
+            except RuntimeError as e:
+                print("[vid] WARNING --auto-orient is OFF, keeping --rotate %d: %s" % (a.rotate, e),
+                      flush=True)
+        if seed_detector is not None:
+            auto = FO.AutoOrient(FO.DetectorPoseScorer(seed_detector, model), initial=a.rotate,
+                                 log=lambda text: print("[vid]   %s" % text, flush=True))
+            print("[vid]   auto-orient : ON, person detector %s" % seed_detector.describe(), flush=True)
+    applied_rotation = a.rotate
+
     measured = np.zeros(133, dtype=bool)
     xyz_cam = np.zeros((133, 3), dtype=np.float32)
     xyz_cam_track = np.zeros((133, 3), dtype=np.float32)
@@ -943,6 +979,8 @@ def main():
             extra += " speed=%.2f late=%d" % (pace["speed"], pace["late"])
         if multi is not None:
             extra += " " + multi.summary()
+        if auto is not None:
+            extra += " " + auto.describe()
         print("[vid] frames=%d sent=%d skipped=%d fps~%.1f replay=%d%s %s"
               % (frames, sent, skipped, sent / el, replay, extra, note), flush=True)
 
@@ -1002,7 +1040,25 @@ def main():
                     loop_frame = 0
                     continue
 
-            frame = orient_frame(frame, a.rotate, a.flip)
+            rotation = a.rotate
+            if auto is not None:
+                # F-57. Undecided means the frame is not used: posing a frame that may be sideways
+                # produces a plausible wrong skeleton, and this only lasts until a few frames agree.
+                rotation = auto.rotation_for(frame, time.time())
+                if rotation is None:
+                    skipped += 1
+                    if time.time() - last_beat >= HEARTBEAT_SECONDS:
+                        last_beat = time.time()
+                        heartbeat("finding which way is up")
+                    continue
+                if rotation != applied_rotation:
+                    # Everything below was derived from the old picture: the crop box, the intrinsics, the
+                    # per-person filters and the tracker's identities. Force them to be rebuilt.
+                    applied_rotation = rotation
+                    ctx["w"] = 0
+                    if multi is not None:
+                        multi.reset()
+            frame = orient_frame(frame, rotation, a.flip)
             if ctx["w"] and (frame.shape[0], frame.shape[1]) != (ctx["h"], ctx["w"]):
                 # F-50. A WebRTC sender adapts its resolution to the bandwidth, and any live source may
                 # be reopened at another size. The crop box, the focal length and the per-person state
@@ -1016,7 +1072,7 @@ def main():
                 ctx["h"], ctx["w"] = frame.shape[0], frame.shape[1]
                 fps = (cap.get(cv2.CAP_PROP_FPS) if cap is not None else 0.0) or 30.0
                 ctx["src_fps"] = 30.0 if (fps < 1.0 or fps > 240.0 or math.isnan(fps)) else fps
-                ctx["fx"] = ctx["fy"] = 0.5 * ctx["w"] / math.tan(math.radians(a.hfov) * 0.5)
+                ctx["fx"] = ctx["fy"] = FO.focal_px(ctx["w"], ctx["h"], a.hfov, a.hfov_axis)
                 ctx["intr"] = (ctx["fx"], ctx["fy"], ctx["w"] * 0.5, ctx["h"] * 0.5)
                 ctx["state"] = fresh_state()
                 print("[vid]   frame       : %dx%d @ %.2f fps   assumed fx=fy=%.1f (hfov %.0f deg)"
@@ -1086,6 +1142,8 @@ def main():
                     continue
                 sock.sendto(json.dumps(message).encode("utf-8"), (a.host, a.port))
                 sent += 1
+                if auto is not None:
+                    auto.note_sent(time.time())
                 continue
 
             uv, zrel, conf = model.infer(frame, state["bbox"])
@@ -1095,7 +1153,11 @@ def main():
             if refined is not None and body_conf >= a.conf:
                 state["bbox"] = tuple(0.7 * np.array(state["bbox"]) + 0.3 * np.array(refined))
             else:
-                state["bbox"] = R.center_bbox(w, h)
+                # F-57: lost. The centred 3:4 crop is the F-49 fallback; with the detector loaded
+                # (--auto-orient) start from the person it finds instead, so a person who stands to the
+                # side of a landscape frame is acquired rather than waited for.
+                seeded = FO.seed_bbox(seed_detector, frame) if seed_detector is not None else None
+                state["bbox"] = seeded if seeded is not None else R.center_bbox(w, h)
 
             if conf[11] < a.conf or conf[12] < a.conf:
                 skipped += 1
@@ -1162,6 +1224,8 @@ def main():
                 msg["rh"] = rh
             sock.sendto(json.dumps(msg).encode("utf-8"), (a.host, a.port))
             sent += 1
+            if auto is not None:
+                auto.note_sent(time.time())
     finally:
         if reader is not None:
             reader.stop()

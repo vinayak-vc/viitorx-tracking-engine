@@ -291,11 +291,37 @@ set CAMERA_PIN=123456
   imported only when a LAN camera is used. Snapshot `pip freeze` before touching the venv: installing them was checked
   not to move numpy, OpenCV, onnxruntime-directml or protobuf.
 * Only the newest frame is processed; a phone that changes resolution mid-stream is noticed and the crop/intrinsics are
-  re-derived. If the avatar lies sideways use `--rotate 90|270` (aiortc ignores a phone's orientation header).
+  re-derived. If the avatar lies sideways use `--rotate 90|270` (aiortc ignores a phone's orientation header) or let
+  `--auto-orient` find it (F-57, below).
 * When WebRTC cannot connect (router client isolation, firewall, a phone on another network with no TURN entry on the
   server) the log says so with the likely causes. There is no MJPEG/tunnel fallback in this utility.
 * The server's side of the contract (events, errors, pitfalls, a checklist for a receiver in any language) is documented in the LAN
   camera project: `lan-camera-streaming/docs/receiver-guide.md`. `lan_camera.py` is written to it and is a Python reference.
+
+#### Portrait or landscape, upright or sideways — `--auto-orient` and `--hfov-axis long` (F-57)
+
+A phone on the LAN camera and a webcam are turned between portrait and landscape by hand, and an app may deliver the picture
+upright, sideways or upside down. `--rotate` is a fixed number; `--auto-orient` finds it:
+
+```bash
+.venv/Scripts/python.exe tools/video/video_udp_sender.py --video <clip|camera:0|viewer link> --auto-orient --hfov-axis long
+```
+
+* **How it decides.** It runs the person detector and the pose model on the four rotations of a few frames and keeps the rotation
+  where a person is detected AND the pose reads as a body standing up (head above shoulders above hips above ankles). It needs a
+  person in view; until it has 4 agreeing frames the frames are not used (a log line says `orientation: rotate N (...)`). With nobody
+  in view for 4 s it keeps `--rotate` and tries again later.
+* **When it looks again.** At the start; whenever the delivered frame changes size (a phone turned between portrait and
+  landscape does exactly that); and, slowly, while nothing is being emitted (3 s), which covers a rotation that keeps the frame
+  size. It switches only after 3 agreeing checks, and never while poses are being sent.
+* **`--hfov-axis long`.** `--hfov` is then the field of view across the LONGER side of the picture, so one phone has one focal
+  length in pixels in portrait and in landscape. The default `width` is the old rule (a portrait frame gets a shorter focal
+  length than the same phone in landscape).
+* **A person off to the side.** With `--auto-orient` the single-person path starts its crop from the person the detector finds, not
+  from the centred 3:4 region (only ~42% of a landscape frame's width).
+* **Needs** `models/yolox_s.onnx` (`tools/model/fetch_yolox_s.py`). Without it the sender prints a WARNING and keeps `--rotate`.
+  `--max-poses` already loads it; the detector is shared, not loaded twice. Off (the default) imports nothing new.
+* Not for the OAK-D senders: they have their own `--portrait` / `--portrait-dir` (F-19) because the camera's mount is known.
 
 #### Several people from a phone, webcam or video — `--max-poses N` (F-52)
 

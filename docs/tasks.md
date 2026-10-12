@@ -14,7 +14,9 @@ Unity repo: `docs/tasks.md` F-60, `docs/decisions.md` **ADR-096** (numbers, thre
 - [x] `tests/test_framing.py` 72/72 (18 mutations caught); all 13 other test files unchanged and green.
 - [x] `tools/video/f60_partial_body_eval.py capture|eval|midrun`: the measurement behind ADR-096 (needs a clip with a full body, the model and the detector).
 - [x] Auto-orient (F-57) re-measured on waist/chest/shoulders crops: upright rotation wins 29-30 of 30.
-- [ ] NOT TESTED: a physical webcam, a seated user, the laptop's real field of view (`--hfov`), a phone in portrait with only the upper body in view.
+- [x] 2026-10-12 (Unity ADR-097): below tier 0 the whole lower body (WholeBody 11-22: hips, knees, ankles, feet) is sent as absent, not only the joints outside the image;
+  found on two recordings of a seated user, where the model's hips and feet inside the picture moved Unity's floor. `mask_outside(uv, conf, size, out, tier)`; `test_framing.py` 78/78.
+- [ ] NOT TESTED: a physical webcam, the laptop's real field of view (`--hfov`), a phone in portrait with only the upper body in view (SR1 is a portrait phone recording: tracked, not measured against a truth).
 
 ---
 

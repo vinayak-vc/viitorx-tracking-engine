@@ -274,6 +274,18 @@ check(res is out, "mask_outside fills and returns the caller's buffer (no alloca
 check(out[9] == 0.0 and out[10] == 0.0, "joints outside the image are sent as absent")
 check(abs(out[11] - 0.9) < 1e-6 and abs(out[0] - 0.9) < 1e-6, "joints inside it, and within 2% of its edge, keep their confidence")
 check(abs(conf[9] - 0.9) < 1e-6, "the model's own array is not modified")
+uv_in = np.zeros((133, 2), np.float32)
+uv_in[:, 0] = 600.0
+uv_in[:, 1] = 300.0
+conf_in = np.full(133, 0.9, np.float32)
+for tier in (FR.TIER_SHOULDERS, FR.TIER_HEAD):
+    res = tr.mask_outside(uv_in, conf_in, (FW, FH), out, tier)
+    check(all(out[i] == 0.0 for i in range(11, 23)), "tier %d: hips, knees, ankles and feet are sent as absent although they are inside the picture" % tier)
+    check(all(abs(out[i] - 0.9) < 1e-6 for i in list(range(0, 11)) + list(range(23, 133))), "tier %d: head, shoulders, arms, face and hands are untouched" % tier)
+tr.mask_outside(uv_in, conf_in, (FW, FH), out, FR.TIER_HIPS)
+check(all(abs(out[i] - 0.9) < 1e-6 for i in range(133)), "tier 0: nothing inside the picture is masked (the full-body path is unchanged)")
+tr.mask_outside(uv_in, conf_in, (FW, FH), out)
+check(all(abs(out[i] - 0.9) < 1e-6 for i in range(133)), "the tier argument defaults to the hips")
 
 tr = FR.FramingTracker(0.3, HEIGHT)
 uv, zrel, conf = person()

@@ -52,6 +52,10 @@ R_HIP = 12
 L_ANKLE = 15
 R_ANKLE = 16
 
+#: RTMW3D WholeBody indices of everything below the waist: hips 11, 12; knees 13, 14; ankles 15, 16; and the six foot
+#: keypoints 17-22 (big toe, small toe, heel, both sides).
+LOWER_BODY = tuple(range(11, 23))
+
 TIER_HIPS = 0
 TIER_SHOULDERS = 1
 TIER_HEAD = 2
@@ -411,14 +415,21 @@ class FramingTracker:
             return 0.5 * (float(zrel[L_SHOULDER]) + float(zrel[R_SHOULDER])) - self.dz_shoulder
         return float(zrel[NOSE]) - self.dz_nose
 
-    def mask_outside(self, uv, conf, frame_size, out):
-        """`out` (133,) <- conf with every keypoint that lies outside the image zeroed.
+    def mask_outside(self, uv, conf, frame_size, out, tier=TIER_HIPS):
+        """`out` (133,) <- conf with every keypoint that lies outside the image zeroed, and, when `tier` is not
+        TIER_HIPS, the whole lower body (hips, knees, ankles, feet) too.
 
         Applied to every anchored frame: when the frame cuts the body, RTMW3D keeps answering for the part
         that is not there - on waist-up crops it returned wrists, elbows and knees below the image edge at
         confidence >= 0.3, and the old path sent them (ADR-096). On the 147 dancers (471 full-body frames) not
         one joint or hand point lies more than 2% outside the image, so for a full body in the picture this
-        changes nothing."""
+        changes nothing.
+
+        BELOW TIER 0 THE LOWER BODY IS ABSENT, not merely the part of it outside the image. A seated person at a desk
+        (two phone recordings, 2026-10-12) had the model's hips, knees and feet answered INSIDE the picture at
+        confidence 0.3-1.0 on 3-100% of frames, ABOVE the hips or within 0.2 m of them: the picture's bottom edge
+        is the desk, not the floor. The root is an estimate on those frames, so a hip joint beside it is a second,
+        contradicting answer, and the feet were taking the Unity floor for a ride."""
         width, height = frame_size
         tx = OUTSIDE_TOLERANCE * width
         ty = OUTSIDE_TOLERANCE * height
@@ -426,6 +437,9 @@ class FramingTracker:
             u = float(uv[i][0])
             v = float(uv[i][1])
             out[i] = conf[i] if (-tx <= u <= width + tx and -ty <= v <= height + ty) else 0.0
+        if tier != TIER_HIPS:
+            for i in LOWER_BODY:
+                out[i] = 0.0
         return out
 
     # ---------------------------------------------------------------- the decision

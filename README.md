@@ -335,7 +335,9 @@ from one that is imagined. `--partial-body` (on by default; `--no-partial-body` 
   person who leans over a desk falls to tier 1 and back with no restart. Hips need to be 5% clear of the picture's edge to start
   counting (a hip on the border is the model's biased guess and flaps the tier), and leave only when they are outside it.
 * **On the wire:** `fr` = 0 / 1 / 2 (per person and at the root; absent = hips). Below tier 0 the hip joints and everything under them
-  are sent as absent (`[0,0,0,0]`), never invented; so is any joint outside the image, in every tier.
+  are sent as absent (`[0,0,0,0]`), never invented; so is any joint outside the image, in every tier. (Until 2026-10-12 only the
+  second half of that sentence was true: a seated user's hips, knees and feet, which the model answers for INSIDE the picture,
+  went out and moved the Unity floor. `mask_outside(..., tier)` now zeroes WholeBody 11-22 below tier 0; Unity ADR-097.)
 * **Depth** is the first rule the frame supports: height (nose to ankle, with the hips in view and each ankle >= 0.8 torso below them) ->
   shoulder width -> face width -> 2.0 m. The widths are learned in metres from the last measured depth, so the depth continues when the
   hips go; a depth from a width may rise at most 40% a second (turning only ever makes a person look farther). `--depth-range` bounds

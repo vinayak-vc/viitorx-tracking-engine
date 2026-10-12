@@ -1173,7 +1173,7 @@ def main():
             framing = state["framing"]
             anchor = framing.update(uv, conf, zrel, intr, (w, h), a.depth_range, now) if framing is not None else None
             if anchor is not None:
-                conf = framing.mask_outside(uv, conf, (w, h), state["conf_buf"])
+                conf = framing.mask_outside(uv, conf, (w, h), state["conf_buf"], anchor.tier)
             if framing is not None:
                 event = framing.take_event()
                 if event:

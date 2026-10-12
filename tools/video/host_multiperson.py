@@ -142,7 +142,7 @@ class HostMultiPerson:
                 print("[vid]   person %d framing: %s" % (track.id, event), flush=True)
             if anchor is None:
                 return None, pose_ms
-            conf = state.framing.mask_outside(uv, conf, (w, h), state.conf_buf)
+            conf = state.framing.mask_outside(uv, conf, (w, h), state.conf_buf, anchor.tier)
             hip_z = anchor.hip_z
             hip_uv = (anchor.hip_u, anchor.hip_v)
         else:

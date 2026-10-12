@@ -1,0 +1,32 @@
+[
+  {
+    "name": "A_NORMAL_START",
+    "passed": true,
+    "detail": "ready=6.8s sid=4df8a4922c3d"
+  },
+  {
+    "name": "B_FORCED_KILL_x2",
+    "passed": true,
+    "detail": "initial sid=167a41ac855b (8.4s); kill#1 -> new_sid=efa12c3f0775 T_recover=7.8s; kill#2 -> new_sid=10f612c0b5a3 T_recover=8.7s"
+  },
+  {
+    "name": "D_DUPLICATE_GUARD",
+    "passed": true,
+    "detail": "2nd_rc=1 first_still_ready_same_sid=True"
+  },
+  {
+    "name": "E_CRASH_LOOP_TRIPS",
+    "passed": true,
+    "detail": "tripped_after=20.5s exits=5 crash_loop_events=1 restart_count=5"
+  },
+  {
+    "name": "E_CRASH_LOOP_KEEPS_RETRYING",
+    "passed": true,
+    "detail": "supervisor_alive=True state=FAILED_PERMANENT restart_count 5->7"
+  },
+  {
+    "name": "F_DEPENDENCY_FAILURE",
+    "passed": true,
+    "detail": "rc=2 reason=python executable not found: D:\\Unity\\viitorx-vrm-avtar-unity-base-project\\Assets\\Games\\viitorx-vrm-avtar-unity\\python-sidecar~\\does_not_exist_python.exe no_restart_loop=True"
+  }
+]

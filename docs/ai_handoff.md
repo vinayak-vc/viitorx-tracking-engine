@@ -18,6 +18,13 @@
 
 ---
 
+## 2026-10-12: AUTO ORIENT FOR A PHONE / WEBCAM / VIDEO (F-57)
+
+`--auto-orient` picks the rotation by scoring the four rotations (detector x pose x "reads upright") on a few frames and re-does it when the frame size changes; `--hfov-axis long` makes one phone have one focal length in portrait and landscape. Off by default. Details and numbers: Unity repo `docs/decisions.md` ADR-093; module header of `tools/video/frame_orientation.py`.
+**Carry forward:** the OAK-D senders do not use it (known mount, `--portrait`); do not retune the thresholds without re-running the 96-run decision test; not yet run on a live phone.
+
+---
+
 ## 2026-10-10 (even later): THREE FIXES FROM THE FIRST LIVE TWO-PERSON RUN (F-52 follow-up)
 
 `LoadTicker` keeps the `frames=0 sent=0 loading ...` heartbeat going during blocking model loads (the supervisor kills a child silent for 10 s; the FP32 model needs ~14 s);

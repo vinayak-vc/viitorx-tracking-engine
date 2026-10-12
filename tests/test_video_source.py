@@ -350,6 +350,29 @@ check(not unknown, "every forwarded flag is defined by video_udp_sender.py", str
 check(SUP.SENDER_BY_SCRIPT.get("video_udp_sender.py") == SUP.SENDER_VIDEO,
       "SENDER_BY_SCRIPT maps the sender by basename")
 
+# F-57: --video-auto-orient / --video-hfov-axis. Off by default, forwarded only when asked, and both must be
+# flags the sender's own argparse defines (an unknown flag makes Python exit before the clip opens).
+def video_cmd_f57(*extra):
+    a = SUP.build_arg_parser().parse_args(
+        ["--script", os.path.join(os.path.dirname(V.__file__), "video_udp_sender.py"),
+         "--video", "https://example.com/clip.mp4", "--evidence-dir", os.path.join(tmp, "ev4")] + list(extra))
+    return SUP.Supervisor(a).build_command()
+
+
+plain = video_cmd_f57()
+check("--auto-orient" not in plain and "--hfov-axis" not in plain,
+      "F-57: by default neither orientation flag is forwarded (the F-49 command line, unchanged)")
+oriented = video_cmd_f57("--video-auto-orient", "--video-hfov-axis", "long")
+check("--auto-orient" in oriented, "F-57: --video-auto-orient -> the sender's --auto-orient")
+check(oriented[oriented.index("--hfov-axis") + 1] == "long", "F-57: --video-hfov-axis long is forwarded with its value")
+check("--hfov-axis" not in video_cmd_f57("--video-hfov-axis", "width"), "F-57: the default axis (width) forwards nothing")
+check([t for t in oriented if t not in ("--auto-orient", "--hfov-axis", "long")] == plain, "F-57: nothing else in the command changes")
+unknown_f57 = [t for t in oriented if t.startswith("--") and t not in defined]
+check(not unknown_f57, "F-57: every flag forwarded with auto-orient on is defined by video_udp_sender.py", str(unknown_f57))
+check(video_cmd_f57("--video-auto-orient", "--video-rotate", "90")[
+      video_cmd_f57("--video-auto-orient", "--video-rotate", "90").index("--rotate") + 1] == "90",
+      "F-57: the manual rotation is still forwarded as the starting guess")
+
 # F-52: --video-max-poses. Unity ALWAYS passes the OAK multi-person --max-poses (default 3), so the video
 # sender must never inherit it: only --video-max-poses > 1 may switch multi-person on.
 def video_cmd(*extra):

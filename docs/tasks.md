@@ -5,6 +5,18 @@ Scope boundary: sensor → signal → datagram. See `../AGENTS.md` §2.
 
 ---
 
+## ✅ F-57 — auto orient: portrait / landscape / sideways for a phone, webcam or video (2026-10-12) — BUILT, MEASURED ON RECORDINGS
+
+Unity repo: `docs/tasks.md` F-57, `docs/decisions.md` **ADR-093** (numbers, thresholds, DO-NOT list).
+
+- [x] `tools/video/frame_orientation.py`: scores the four rotations (detector x pose x upright geometry), votes, re-opens on a frame-size change, slow self-check while nothing is emitted, long-axis focal length, detector-seeded crop for the single-person path.
+- [x] `video_udp_sender.py --auto-orient --hfov-axis long`; `sidecar_supervisor.py --video-auto-orient --video-hfov-axis`. Defaults off: the F-49 command and behaviour are unchanged.
+- [x] `tests/test_frame_orientation.py` 55/55 (12 mutations, all caught); `tests/test_video_source.py` 157/157 (forwarding of both flags).
+- [x] Decision: 96/96 correct locks on 4 real clips x 24 start points x random rotation; end to end sideways phone clip 0.06 m body -> 1.64 m.
+- [ ] NOT TESTED: a live phone / webcam turned between portrait and landscape; an empty room end to end.
+
+---
+
 ## ✅ F-52 — multi-person for a phone / webcam / video: a host-side detector in front of the F-32 tracker (2026-10-10) — BUILT AND MEASURED ON FILES
 
 Report and ADR live in the Unity repo: `docs/tasks.md` F-52, **ADR-088**. No wire change (the F-32 `persons[]` shape is reused).

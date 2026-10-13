@@ -68,6 +68,19 @@ py-modules = [
     "f21_cue_display",
     "evidence_paths",
     "_sidecar_path",
+    "hand_landmarker",
+    "hand_tracking",
+    "hand_geometry",
+    "hand_gestures",
+    "hand_wire",
+    "hand_overlay",
+    "roi_geometry",
+    "landmark_filters",
+    "face_landmarker",
+    "face_tracking",
+    "face_geometry",
+    "face_wire",
+    "face_overlay",
 ]
 
 [tool.ruff]

@@ -55,6 +55,19 @@ the landmark contract, and leaves it byte-identical. See *Multi-person* below.
 | `person_tracker.py` | F-32 detections → persistent person ids, associating in **3-D** | `PersonTracker.update` |
 | `person_filters.py` | F-33 one complete P0+P1-1+F-22 chain **per person**, pooled on track id | `PersonFilters`, `PersonFilterPool` |
 | `multiperson_udp_sender.py` | the multi-person frame loop and payload build | `main`, `build_person_payload` |
+| `hand_landmarker.py` | H-01 palm detector + hand-landmark network (ONNX), ROI maths, decode. Stateless | `PalmDetector.detect`, `HandLandmarkNet.infer`, `roi_from_palm`, `roi_from_landmarks` |
+| `hand_tracking.py` | H-01 ids, detect-then-track, assignment, smoothing, placement, fingers | `HandTracker.update` |
+| `hand_geometry.py` | H-01 monocular 3D: fit the network's metric hand to its pixels | `Camera.from_hfov`, `place_hand` |
+| `hand_gestures.py` | H-01 finger curls, pinch, gesture set, debouncer | `read_fingers`, `GestureStabilizer` |
+| `hand_wire.py` | H-01 the `kind:"hands"` datagram: encode, parse, validate | `encode_message`, `parse_message` |
+| `hand_overlay.py` | H-01 the demo window drawing | `render` |
+| `roi_geometry.py` | H-01/H-02 shared: rotated crop (`Roi`, `cut_roi`), SSD anchors, NMS, letterbox. No state | `Roi`, `cut_roi`, `make_ssd_anchors`, `letterbox` |
+| `landmark_filters.py` | H-01/H-02 shared: a vectorised One-Euro bank, arithmetic identical to `smoothing.OneEuro` | `VectorFilter.filter` |
+| `face_landmarker.py` | H-02 face detector + 478-point mesh + 52-score blendshape network (ONNX), crop rules, decode. Stateless | `FaceDetector.detect`, `FaceMeshNet.infer`, `BlendshapeNet.infer`, `roi_from_landmarks` |
+| `face_tracking.py` | H-02 ids, detect-then-track, assignment, smoothing, blendshapes, pose, placement | `FaceTracker.update` |
+| `face_geometry.py` | H-02 head pose (four landmarks) and position (eye-corner distance) | `head_pose`, `place_face` |
+| `face_wire.py` | H-02 the `kind:"face"` datagram: encode, parse, validate | `encode_message`, `parse_message` |
+| `face_overlay.py` | H-02 the demo window drawing | `render` |
 
 Dependency direction is strictly **downward**: `wholebody_udp_sender` imports the others; none of them
 import it, and `joint_tracker.py` imports **nothing but `math`** so it stays unit-testable in isolation.

@@ -21,6 +21,8 @@ are the Unity repo's. See `../AGENTS.md` §2.
 | **F-29** | Trust channel on the wire (`st` / `own` / `lat`) — additive, drives nothing | **done** | Unity ADR-066 |
 | **F-32** | **Multi-person**: VPU person detector, optimal 3-D assignment, stable ids, additive wire | **done on recorded video**; never run with real people | Unity ADR-070 |
 | **F-33** | **Per-person filter chains** keyed on the track id, with a self-measured sample rate | **done and measured**; same caveat | Unity ADR-071 |
+| **H-01** | **Hands only, no body**: palm detector + landmark net (ONNX), ids, 3D estimate, finger poses, gestures; a new wire on UDP 8901 | **built and tested (207 assertions)**; never run on a live camera | Unity ADR-099 |
+| **H-02** | **Face only, no body**: face detector + 478-point mesh + 52 blendshapes (ONNX), ids, head pose, 3D estimate; a new wire on UDP 8902 | **built and tested (390 assertions with H-01)**; never run on a live camera | Unity ADR-100 |
 
 **F-32/F-33 in one line each.** F-32 answered *who is in frame and which of them is which*: a
 `person-detection-retail-0013` blob on the otherwise-idle VPU (free — rgb 29.8 → 29.7 fps), optimal

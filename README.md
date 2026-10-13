@@ -429,6 +429,58 @@ estimate; leave it off to let a clip's framing exercise Unity's F-48 operating v
 replays forever; after a finite `--loop N` it idles rather than exiting, because the supervisor would
 restart it. It prints the supervisor's readiness markers and a heartbeat, including while downloading.
 
+### Hands only — no body in the picture (H-01)
+
+The body senders need a person: RTMW3D reads the hands out of a crop around a detected body, so a frame with a hand and no body gives
+them nothing. `tools/hands/hands_udp_sender.py` is a separate pipeline that finds a hand directly (MediaPipe's palm detector and hand-landmark
+network, OpenCV Zoo ONNX, on the existing onnxruntime-directml: **no new pip package**).
+
+```bash
+.venv/Scripts/python.exe tools/model/fetch_hand_models.py        # once: 2 files, 8 MB, size and SHA-256 verified, not in version control
+scripts/run_hands_demo.bat                                        # double-click: webcam 0, mirrored, the demo window
+.venv/Scripts/python.exe tools/hands/hands_udp_sender.py --video camera:0 --flip --show
+.venv/Scripts/python.exe tools/hands/hands_udp_sender.py --video "http://192.168.1.5:3000/viewer?room=room-abc123" --show   # LAN camera (CAMERA_PIN)
+.venv/Scripts/python.exe tools/hands/hands_udp_receiver.py --view  # a second terminal: what a client of the wire sees
+.venv/Scripts/python.exe tools/hands/hands_eval.py --video clip.mp4 --provider dml     # measure a clip
+```
+
+* **Wire:** `{ver:1, kind:"hands", ...}` as one JSON datagram per frame to **127.0.0.1:8901** (the body datagram on 8899 is untouched). Every field is
+  documented in the docstring of `hand_wire.py`. Per hand: `id` (never reused), `side`, `lm` (21 x 3, normalised image), `wl` (21 x 3, metres,
+  hand-centred), `pos` (the hand's centre in camera space, metres; **absent** with a `why` when the 3D fit was refused), `fing` (5 curls), `ext`, `pinch`, `ges`
+  (OPEN FIST POINT VICTORY ROCK THUMBS_UP OK NONE). A frame with no hand is `n = 0`. `n` never exceeds `--max-hands`.
+* **`pos` is an estimate, not a measurement.** One camera has no stereo: the distance comes from the hand's size in the picture against the network's average
+  hand and an ASSUMED field of view (`--hfov`, default 60 degrees; `--hand-scale` is your hand relative to average). Not measured against a ruler.
+* **Sides:** MediaPipe's L/R label assumes a mirrored picture; `--sides auto` flips it when the picture is not mirrored (`--flip`). Not checked against a known hand.
+* **Limits:** crossing hands can lock both crops onto one hand (ids may swap); a hand narrower than ~5% of a 1280 px frame is below the palm detector; **never run on
+  a live camera** - see `docs/H01_HANDS_ONLY_2026-10-13.md` (Unity repo) section 7 for the full NOT TESTED list.
+* The entry point is in `tools/` (not shipped by a Unity build); the six `hand_*.py` modules it drives are at the root and import nothing from `tools/`.
+
+### Face only — no body in the picture (H-02)
+
+The face counterpart of the hands pipeline: `tools/face/face_udp_sender.py` finds a face directly (MediaPipe's face detector, 478-point mesh and
+52-score blendshape network, community ONNX conversions of the TFLite models in `face_landmarker.task`, on the existing onnxruntime-directml:
+**no new pip package**). Both senders share one frame loop (`tools/video/vision_sender.py`) and the same `--video` sources.
+
+```bash
+.venv/Scripts/python.exe tools/model/fetch_face_models.py        # once: 3 files, 6.4 MB, size and SHA-256 verified, not in version control
+scripts/run_face_demo.bat                                         # double-click: webcam 0, mirrored, the demo window
+.venv/Scripts/python.exe tools/face/face_udp_sender.py --video camera:0 --flip --show
+.venv/Scripts/python.exe tools/face/face_udp_sender.py --video "http://192.168.1.5:3000/viewer?room=room-abc123" --show   # LAN camera (CAMERA_PIN)
+.venv/Scripts/python.exe tools/face/face_udp_receiver.py --view   # a second terminal: what a client of the wire sees
+.venv/Scripts/python.exe tools/face/face_eval.py --video clip.mp4 --provider cpu --crop X0 Y0 X1 Y1   # measure a clip
+```
+
+* **Wire:** `{ver:1, kind:"face", ...}` as one JSON datagram per frame to **127.0.0.1:8902** (hands 8901, body 8899 untouched). Every field is documented in the docstring of
+  `face_wire.py`. Per face: `id` (never reused), `bs` (52 scores), `lm` (478 x 3, normalised image; `--landmarks mesh|none` shrinks it), `pos` (the point between the eyes, metres;
+  **absent** with a `why` when refused), `yaw` / `pitch` / `roll` and `rot` (the head's 3x3). A frame with no face is `n = 0`. `n` never exceeds `--max-faces`.
+* **The 52 are `_neutral` + 51 ARKit-compatible shapes. There is no `tongueOut`.** Index by name (`face_wire.BLENDSHAPE_NAMES`), not by ARKit's order. Left / Right are the subject's.
+* **Position and head pose are estimates, not measurements.** `pos` is the eye-corner distance against an assumed 0.09 m (`--face-scale`) through an assumed field of view (`--hfov`); the pose is a
+  geometric estimate from four landmarks with an uncalibrated neutral pitch. `lm` and `bs` do not depend on those assumptions.
+* **The detector is SHORT RANGE:** a face a few percent of the frame (a full-body clip) is not found. Sit within ~1.5 m, or `--crop` to the face.
+* **Provenance and limits:** the ONNX files are a third party's conversion (parity with Google's was not reproduced); **never run on a live camera** - see `docs/H02_FACE_ONLY_2026-10-13.md`
+  (Unity repo) section 7 for the full NOT TESTED list. `--provider cpu` is as fast as DirectML for these small networks and has no 250 ms warm-up.
+* The entry point is in `tools/` (not shipped by a Unity build); the modules it drives are at the root and import nothing from `tools/`.
+
 ### Phase 1 — BlazePose on the OAK-D VPU (fallback)
 
 ```bash
@@ -467,6 +519,20 @@ after the ADR-065 reorganisation:
 # F-50 LAN camera (WebRTC): 78 assertions run anywhere; set CAMERA_SERVER_DIR to the lan-camera-streaming
 # project folder and it also drives that real Node server with a fake phone (and the model, for the full chain).
 .venv/Scripts/python.exe tests/test_lan_camera.py             # 103/103 with the server, 78/78 without
+
+# H-01 hands only: ROI geometry and decode (+ one real-network smoke test), the 3D fit, gestures, tracking (fake world), the wire.
+.venv/Scripts/python.exe tests/test_hand_landmarker.py        # 61/61
+.venv/Scripts/python.exe tests/test_hand_geometry.py          # 24/24
+.venv/Scripts/python.exe tests/test_hand_gestures.py          # 36/36
+.venv/Scripts/python.exe tests/test_hand_tracking.py          # 52/52
+.venv/Scripts/python.exe tests/test_hand_wire.py              # 34/34
+
+# H-02 face only: constants, anchors, detector decode and weighted NMS, the crop rules, the mesh decode, head pose, the tracker (fake world), the wire; and the shared filter.
+.venv/Scripts/python.exe tests/test_face_landmarker.py        # 68/68
+.venv/Scripts/python.exe tests/test_face_geometry.py          # 22/22
+.venv/Scripts/python.exe tests/test_face_tracking.py          # 46/46
+.venv/Scripts/python.exe tests/test_face_wire.py              # 36/36
+.venv/Scripts/python.exe tests/test_landmark_filters.py       # 11/11
 
 # Replay + adversarial against a real capture (needs a --log-dir from a session).
 .venv\Scripts\python.exe tools\diagnostics\evaluate_p1.py --dir <capture-dir>

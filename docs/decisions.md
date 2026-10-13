@@ -23,6 +23,8 @@ Cross-repo decisions are recorded in **both** files.
 | ADR-066 | `wholebody_udp_sender.py` | F-29 trust channel: `st` / `own` / `lat` are read-only echoes of decisions already made. Additive; nothing reads them back. |
 | ADR-070 | `assignment.py`, `person_tracker.py`, `multiperson_udp_sender.py` | F-32 multi-person: detector on the VPU, optimal assignment on the host, 3-D association, additive wire. |
 | ADR-071 | `person_filters.py`, `smoothing.py` | F-33 per-person filter chains keyed on the track id, with a self-measured sample rate; the feet and head join the filter group. |
+| ADR-099 | `hand_landmarker.py`, `hand_tracking.py`, `hand_geometry.py`, `hand_gestures.py`, `hand_wire.py`, `tools/hands/*` | H-01 hands only: a separate sender and a NEW wire (`kind:"hands"`, UDP 8901); `pos` is an ESTIMATE from hand size and an assumed field of view, absent when the fit is refused. Not run on a live camera. |
+| ADR-100 | `face_landmarker.py`, `face_tracking.py`, `face_geometry.py`, `face_wire.py`, `roi_geometry.py`, `landmark_filters.py`, `tools/face/*`, `tools/video/vision_sender.py` | H-02 face only: a sibling sender and a NEW wire (`kind:"face"`, UDP 8902); 52 blendshapes by name (1 `_neutral` + 51 ARKit, no tongueOut); head pose and `pos` are ESTIMATES; third-party ONNX conversions. Not run on a live camera. |
 
 ---
 

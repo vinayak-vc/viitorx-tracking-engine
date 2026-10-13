@@ -13,6 +13,38 @@ public interface and is what semver applies to here.
 
 ### Added
 
+- **Face only, no body (H-02).** A sibling of the hands pipeline for a camera that sees a face and no person. MediaPipe's face
+  detector, 478-point face mesh and 52-score blendshape network, as community ONNX conversions of the TFLite models in
+  `face_landmarker.task`, run on the existing `onnxruntime-directml` (**no new pip package**; `tools/model/fetch_face_models.py`
+  fetches them by size and SHA-256).
+  - `face_landmarker.py`, `face_tracking.py`, `face_geometry.py`, `face_wire.py`, `face_overlay.py` at the root;
+    `tools/face/face_udp_sender.py` (webcam, LAN camera, stream, file; `--show` is the demo), `face_udp_receiver.py`,
+    `face_eval.py`; `scripts/run_face_demo.bat`.
+  - **A NEW wire message** `{ver:1, kind:"face"}` on UDP **8902**. The body (8899) and hands (8901) datagrams are unchanged. Per face:
+    a stable id, 52 blendshape scores by `BLENDSHAPE_NAMES` (index 0 `_neutral`, 1-51 ARKit-compatible, **no tongueOut**), 478
+    landmarks, head pose, an estimated 3D position (absent when refused). Documented in `face_wire.py`.
+  - Shared code extracted from the hands: `roi_geometry.py` (crop maths) and `landmark_filters.py` (a vectorised One-Euro bank,
+    identical arithmetic to `smoothing.OneEuro`, tested to 1e-12); `tools/video/vision_sender.py` is the frame loop both senders use.
+  - Head pose and position are **estimates**; the ONNX files are a third party's conversion whose parity with Google's was not
+    reproduced. Not run on a live camera.
+  - 183 new assertions (`tests/test_face_{landmarker,geometry,tracking,wire}.py`, `test_landmark_filters.py`); the hands' 207 pass
+    unchanged; 42 of 42 injected bugs caught across both pipelines.
+- **Fixed:** playing a FILE paid DirectML's 250 ms first-frame warm-up as a frame deficit and dropped frames to repay it, so the picture
+  jumped for a second. The pacer now restarts after the first frame.
+
+- **Hands only, no body (H-01).** A separate pipeline for a camera that sees a hand and no person. MediaPipe's palm
+  detector and hand-landmark network, as OpenCV Zoo ONNX files, run on the existing `onnxruntime-directml` (**no new pip
+  package**; `tools/model/fetch_hand_models.py` fetches them by size and SHA-256).
+  - `hand_landmarker.py`, `hand_tracking.py`, `hand_geometry.py`, `hand_gestures.py`, `hand_wire.py`, `hand_overlay.py` at
+    the root; `tools/hands/hands_udp_sender.py` (webcam, LAN camera, stream, file; `--show` is the demo),
+    `hands_udp_receiver.py`, `hands_eval.py`; `scripts/run_hands_demo.bat`.
+  - **A NEW wire message** `{ver:1, kind:"hands"}` on UDP **8901**. The body datagram on 8899 is unchanged. Per hand: a stable
+    id, side, 21 image landmarks, 21 metric world landmarks, an estimated 3D position (absent when the fit is refused),
+    finger curls, pinch and a gesture. Documented in `hand_wire.py`.
+  - The 3D position is an **estimate** from the hand's apparent size and an assumed field of view (`--hfov`); it is not
+    measured against a ruler. Not run on a live camera.
+  - 207 assertions in `tests/test_hand_{landmarker,geometry,gestures,tracking,wire}.py`; 25 of 25 injected bugs caught.
+
 - **Per-person filter chains (F-33).** `person_filters.py` gives every tracked person their own
   complete P0 + P1-1 + F-22 chain, pooled on their **track id** (ADR-071). F-32 shipped
   multi-person with all of it switched off and said so; this closes that.

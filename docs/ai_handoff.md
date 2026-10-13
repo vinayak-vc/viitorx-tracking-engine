@@ -18,6 +18,20 @@
 
 ---
 
+## 2026-10-13: FACE ONLY, 52 BLENDSHAPES (H-02)
+
+A sibling of the hands pipeline: `face_landmarker.py` + `face_tracking.py` (+ `face_geometry.py`, `face_wire.py`, `face_overlay.py`) at the root, the entry `tools/face/face_udp_sender.py`, the wire `{ver:1, kind:"face"}` on UDP 8902. The crop maths is now `roi_geometry.py` and the One-Euro bank `landmark_filters.py` (both shared with the hands); the frame loop is `tools/video/vision_sender.py`. The networks are community ONNX conversions of the TFLite models in `face_landmarker.task` (`tools/model/fetch_face_models.py`, size + SHA-256 verified); **no new pip package**. Report: Unity repo `docs/H02_FACE_ONLY_2026-10-13.md`; ADR-100.
+**Carry forward:** the 52 are `_neutral` + 51 ARKit (no tongueOut): index by name; read blendshapes from the RAW landmarks; the detector is SHORT RANGE; head pose and `pos` are estimates; the conversion's parity with Google's was not reproduced. **NOT TESTED on a live camera.** Next: the Unity receivers.
+
+---
+
+## 2026-10-13: HANDS ONLY, NO BODY (H-01)
+
+A separate pipeline, not a mode of the body one: `hand_landmarker.py` + `hand_tracking.py` (+ `hand_geometry.py`, `hand_gestures.py`, `hand_wire.py`, `hand_overlay.py`) at the root, the entry `tools/hands/hands_udp_sender.py`, the wire `{ver:1, kind:"hands"}` on UDP 8901. The networks are MediaPipe's palm detector and hand-landmark network as OpenCV Zoo ONNX (`tools/model/fetch_hand_models.py`, Hugging Face mirror, size + SHA-256 verified); **no new pip package**. Report: Unity repo `docs/H01_HANDS_ONLY_2026-10-13.md`; ADR-099.
+**Carry forward:** `pos.Z` is an ESTIMATE (hand size + assumed `--hfov`), absent with a `why` when refused; the L/R letter follows MediaPipe's mirrored-picture convention; crossing hands can lock both crops onto one hand; the entry point stays in `tools/` until the source handling is extracted to the root. **NOT TESTED on a live camera.** Next: the Unity receiver, then H-02 face only (52 blendshapes, port 8902).
+
+---
+
 ## 2026-10-12: A BODY THE CAMERA CUTS OFF (F-60)
 
 `framing.py` anchors the skeleton on the hips while they are in the picture, then the shoulders, then the nose, per person and per frame, and puts the tier in the datagram as `fr` (0/1/2, absent = hips). Below tier 0 the root and its depth are ESTIMATES (shoulder frame + a hip offset learned from this person; shoulder / face width learned in metres from the last measured depth); a joint outside the image is sent as absent; nothing below the hips is invented. `--no-partial-body` is the old hip gate. Full numbers, thresholds and the DO-NOT list: Unity repo `docs/decisions.md` **ADR-096**; the measurement: `tools/video/f60_partial_body_eval.py`.

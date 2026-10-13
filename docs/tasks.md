@@ -5,6 +5,38 @@ Scope boundary: sensor → signal → datagram. See `../AGENTS.md` §2.
 
 ---
 
+## ✅ H-02 — face only, 52 blendshapes (2026-10-13) — BUILT AND TESTED; NOT RUN ON A LIVE CAMERA
+
+Unity repo: `docs/H02_FACE_ONLY_2026-10-13.md` (the report), `docs/decisions.md` **ADR-100**, `docs/tasks.md` H-02. Wire: a NEW message `{ver:1, kind:"face"}` on UDP **8902**; the hands (8901) and body (8899) datagrams are untouched.
+
+- [x] `face_landmarker.py` (face detector + 478-point mesh + blendshape network, community ONNX conversions of the TFLite models in `face_landmarker.task`, on the existing onnxruntime-directml), `face_tracking.py`, `face_geometry.py` (head pose from four landmarks, position from the eye-corner distance), `face_wire.py`, `face_overlay.py`; shared `roi_geometry.py` and a vectorised `landmark_filters.py` extracted from the hand code (all at the root; none imports from `tools/`)
+- [x] `tools/face/face_udp_sender.py` (webcam, LAN camera, stream, file; `--show` is the demo), `face_udp_receiver.py`, `face_eval.py`; `tools/video/vision_sender.py` (the frame loop the hands and face senders share); `tools/model/fetch_face_models.py`; `scripts/run_face_demo.bat`
+- [x] 52 scores by `BLENDSHAPE_NAMES`: index 0 `_neutral`, 1-51 ARKit-compatible, NO tongueOut; Left/Right are the subject's. Blendshapes are read from the RAW landmarks, smoothed per channel and clamped.
+- [x] Tests 183 new: `test_face_landmarker` 68, `test_face_geometry` 22, `test_face_tracking` 46, `test_face_wire` 36, `test_landmark_filters` 11 (+ `tests/_synthetic_face.py`); the hands' 207 pass unchanged. 42 of 42 injected bugs caught.
+- [x] Measured on a close frontal face clip: 435/435 frames with a face, one id, 7.9 ms a frame on CPU (mesh 6.3, blendshapes 1.1), DirectML the same after a 252 ms warm-up, 29-30 msg/s through sender and receiver with `bad=0 seq_gaps=0`, smoothing 0.3 ms a frame
+- [x] Fixed: a file's slow first frame (DirectML warm-up) made the file pacer drop frames and the face was lost 14 times; the pacer now restarts after the first frame
+- [x] No new pip package. `pyproject.toml` `py-modules` lists the new modules.
+- [ ] **NOT TESTED: a live webcam, a phone, a LAN camera; each expression channel on a real face; the head angles against a real head; `pos` against a ruler; the conversion's parity with Google's models.**
+- [ ] Known limits: the detector is SHORT RANGE (a face ~10% of the letterbox is not found); several faces were not measured; the entry point is in `tools/` (not shipped in a Unity build).
+- [ ] Next: the Unity receivers (hands and face); an ARKit -> VRM expression map; extract the source handling to a root module.
+
+---
+
+## ✅ H-01 — hands only, no body (2026-10-13) — BUILT AND TESTED; NOT RUN ON A LIVE CAMERA
+
+Unity repo: `docs/H01_HANDS_ONLY_2026-10-13.md` (the report), `docs/decisions.md` **ADR-099**, `docs/tasks.md` H-01. Wire: a NEW message `{ver:1, kind:"hands"}` on UDP **8901**; the body datagram (8899) is untouched.
+
+- [x] `hand_landmarker.py` (palm detector + hand-landmark network, OpenCV Zoo ONNX of MediaPipe's models, on the existing onnxruntime-directml; ROI maths, anchors, NMS, decode), `hand_geometry.py` (monocular 3D from the network's metric world landmarks), `hand_gestures.py`, `hand_tracking.py`, `hand_wire.py`, `hand_overlay.py` (all at the root; none imports from `tools/`)
+- [x] `tools/hands/hands_udp_sender.py` (webcam, LAN camera, stream, file; `--show` is the demo), `hands_udp_receiver.py` (reference receiver, `--view` draws from the datagram alone), `hands_eval.py` (measures a clip); `tools/model/fetch_hand_models.py`; `scripts/run_hands_demo.bat`
+- [x] Tests 207 / 25 of 25 injected bugs caught: `test_hand_landmarker` 61, `test_hand_geometry` 24, `test_hand_gestures` 36, `test_hand_tracking` 52, `test_hand_wire` 34 (+ `tests/_synthetic_hand.py`)
+- [x] Measured on a hard dancing clip: 431/435 frames with a hand, 6.7 ms a frame (palm detector 5.0 ms, landmark net 2.5 ms, DirectML; CPU is within 0.2 ms a frame), 30 msg/s through the sender and the receiver with `bad=0 seq_gaps=0`, 78 of 94 losses re-found with the same id
+- [x] No new pip package. `requirements*.txt` unchanged. `pyproject.toml` `py-modules` lists the six new modules.
+- [ ] **NOT TESTED: a live webcam, a phone, a LAN camera; depth against a ruler (`--hfov` is assumed); the L/R letter against a known hand; gesture and smoothing constants on real hands.**
+- [ ] Known limit: crossing hands can lock both crops onto one hand (ids may swap). Known limit: the entry point is in `tools/` because it reuses `video_udp_sender`'s source handling; `tools/` is not shipped in a Unity build.
+- [ ] Next: the Unity receiver; **H-02 face only with 52 blendshapes** (a second wire kind, port 8902); extract the source handling to a root module.
+
+---
+
 ## ✅ F-60 — a body the camera cuts off: hips, then shoulders, then the nose (2026-10-12) — BUILT, MEASURED ON RECORDINGS
 
 Unity repo: `docs/tasks.md` F-60, `docs/decisions.md` **ADR-096** (numbers, thresholds, DO-NOT list). Wire: one additive field, `fr`.

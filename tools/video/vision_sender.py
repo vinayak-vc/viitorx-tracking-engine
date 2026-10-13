@@ -9,7 +9,7 @@ demo window and the exit codes. A sender supplies only a PIPELINE: an object wit
 
     process(frame)                 -> result          the tracker's list for this frame
     encode(result, ctx)            -> dict            the datagram (ctx: session id, seq, time, latency, source, size, mirrored)
-    to_bytes(message)              -> bytes
+    to_bytes(message)              -> bytes, or a list of bytes (S-01: one datagram each, in order) for a message too big for one
     render(frame, result, hud)     -> image           the demo window (hud: fps, infer_ms, source, mirrored, sent)
     heartbeat_extra()              -> str             extra text for the heartbeat line
     banner()                       -> [str]           lines for the startup banner
@@ -266,7 +266,13 @@ def run(a, tag, session_id, port_label, pipeline, window_name):
             seq += 1
             now = time.time()
             ctx = SendContext(session_id, seq, now, (now - t_grab) * 1000.0, kind, frame.shape[1], frame.shape[0], a.flip)
-            sock.sendto(pipeline.to_bytes(pipeline.encode(result, ctx)), addr)
+            payload = pipeline.to_bytes(pipeline.encode(result, ctx))
+            if isinstance(payload, (bytes, bytearray)):
+                sock.sendto(payload, addr)
+            else:
+                # S-01: a message too big for one datagram (the cutout frame carries a picture) comes as a list, in chunk order.
+                for datagram in payload:
+                    sock.sendto(datagram, addr)
             sent += 1
 
             if a.show:

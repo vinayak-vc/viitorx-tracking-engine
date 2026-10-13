@@ -81,6 +81,11 @@ py-modules = [
     "face_geometry",
     "face_wire",
     "face_overlay",
+    "cutout_segmenter",
+    "cutout_matte",
+    "cutout_engine",
+    "cutout_wire",
+    "cutout_overlay",
 ]
 
 [tool.ruff]

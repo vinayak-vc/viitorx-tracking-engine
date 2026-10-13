@@ -18,6 +18,32 @@
 
 ---
 
+## 2026-10-13: CUTOUT (S-01) - THE PERSON IN THE PICTURE, ISOLATED
+
+A third sender and a NEW wire. `cutout_segmenter.py` + `cutout_matte.py` + `cutout_engine.py` + `cutout_wire.py` + `cutout_overlay.py` at the root; the entry `tools/cutout/cutout_udp_sender.py` (webcam, LAN camera, stream, file; the frame loop is the shared `tools/video/vision_sender.py`); the wire is a binary chunked frame (the picture + a soft person mask) on UDP **8903**, documented byte by byte in `cutout_wire.py` and pinned by 26 golden datagrams written into the Unity repo's `Tests/EditMode/VisionFixtures` (`make_vision_fixtures.py`; `test_vision_fixtures.py` checks drift). The networks are MediaPipe's selfie segmenter as two ONNX files (`tools/model/fetch_cutout_models.py`, exactly two URLs, size + SHA-256); the detector and tracker are the existing YOLOX-s and F-32 `PersonTracker`; **no new pip package**. Report: Unity repo `docs/S01_CUTOUT_2026-10-13.md`; ADR-103. Unity renders it (`Runtime/Vision`, `Showcase/Cutout`) and runs NO model.
+
+**How it works in one line.** detector -> tracker -> a square crop per person with the others' boxes painted out (`--isolate`) -> selfie network -> max-merged canvas -> matte -> uint8 mask + the picture, one frame, chunked over UDP.
+
+**Carry forward.** (a) `people` on the wire is the larger of the people tracked and the foreground groups. (b) A wire field change needs the encoder, the fixtures, both test suites and an ADR in both repos. (c) A flag rename breaks Unity's launch silently: `test_vision_cli_contract.py` fails first. (d) `vision_sender.py` accepts a LIST of datagrams from a pipeline (cutout) as well as one (hands, face). (e) Tried and dropped, with numbers: a learned-background veto, a per-person box prior, smoothing the painted boxes (report s.8). (f) The GPU clock falls under the paced duty cycle: a file source's fps decays from ~30 to ~22 over 16 s while the detector's time doubles; not a code defect. **NOT TESTED:** a person on a live webcam (the one 11 s run saw nobody); a phone / LAN camera; a network between machines; a long soak.
+
+## 2026-10-13: PACKAGING PLAN (P-01) - PLAN ONLY
+
+See `docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md`. This repo is planned to become the Viitorx Tracking Engine (compiled `viitorx-tracking.exe`, no `.py` files shipped, models beside it, startup file check, Inno Setup installer). Nothing here has changed yet. A GitHub token was pasted into a chat: it must be revoked, never stored.
+
+## 2026-10-13: UNITY HOSTS THE SENDERS (H-04)
+
+No sender behaviour changed. The Unity repo's AppBootstrap now starts the hands and face senders itself (a `VisionHost`, launched through its `SidecarProcessLauncher` in `DirectSenderOnly` mode), from a settings section and an F6 control panel; two sample scenes in `Showcase/HandsFace`. See Unity `docs/H04_VISION_BOOTSTRAP_AND_SHOWCASE_2026-10-13.md` and ADR-102.
+New here: `tests/test_vision_cli_contract.py` (20 assertions): the command lines Unity builds (`Tests/EditMode/VisionFixtures/args_*.txt`) must be accepted by `hands_udp_sender.build_parser()` and `face_udp_sender.build_parser()` and land in the fields they are named for.
+
+**Carry forward:** renaming or removing a sender flag breaks Unity's launch silently (Python exits before the camera opens); the contract test fails first. One camera feeds one sender: the hands and face senders cannot read the same webcam or LAN viewer together. **NOT TESTED:** Unity starting these senders; a live camera.
+
+## 2026-10-13: UNITY RECEIVERS (H-03)
+
+No sidecar behaviour changed. The Unity repo gained `Runtime/Vision` (assembly `VirtualMirror.Vision`) that reads the hands (8901) and face (8902) wires; see Unity `docs/H03_UNITY_RECEIVERS_2026-10-13.md` and ADR-101.
+New here: `tools/video/make_vision_fixtures.py` (writes 22 golden datagrams with the production encoders into the Unity repo's `Tests/EditMode/VisionFixtures`; `--real` captures `real_hands.json` / `real_face.json` from the networks) and `tests/test_vision_fixtures.py` (45 assertions, fails on drift).
+
+**Carry forward:** a wire change = encoder + regenerate fixtures + both suites + ADR in both repos. The C# parser reads `ver`, then `kind`, as soon as it sees them and refuses an unknown version, so bump `ver` for an incompatible change. **NOT TESTED:** the Unity Editor compile and Play mode; a live camera; a rigged character.
+
 ## 2026-10-13: FACE ONLY, 52 BLENDSHAPES (H-02)
 
 A sibling of the hands pipeline: `face_landmarker.py` + `face_tracking.py` (+ `face_geometry.py`, `face_wire.py`, `face_overlay.py`) at the root, the entry `tools/face/face_udp_sender.py`, the wire `{ver:1, kind:"face"}` on UDP 8902. The crop maths is now `roi_geometry.py` and the One-Euro bank `landmark_filters.py` (both shared with the hands); the frame loop is `tools/video/vision_sender.py`. The networks are community ONNX conversions of the TFLite models in `face_landmarker.task` (`tools/model/fetch_face_models.py`, size + SHA-256 verified); **no new pip package**. Report: Unity repo `docs/H02_FACE_ONLY_2026-10-13.md`; ADR-100.

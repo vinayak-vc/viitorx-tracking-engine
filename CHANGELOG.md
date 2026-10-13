@@ -13,6 +13,30 @@ public interface and is what semver applies to here.
 
 ### Added
 
+- **Cutout: the person in a camera picture, isolated (S-01).** A third sender for the Unity cutout. `tools/cutout/cutout_udp_sender.py`
+  finds each person (the existing YOLOX-s detector and F-32 tracker), cuts a square crop per person with the other people's boxes painted
+  out of it, segments it with MediaPipe's selfie network (ONNX on the existing `onnxruntime-directml`: **no new pip package**;
+  `tools/model/fetch_cutout_models.py` fetches exactly two 0.46 MB files by size and SHA-256), mattes the answer (guided filter, temporal
+  smoothing, edge ramp, speck and pinhole cleanup) and sends the picture and the mask together.
+  - `cutout_segmenter.py`, `cutout_matte.py`, `cutout_engine.py`, `cutout_wire.py`, `cutout_overlay.py` at the root;
+    `tools/cutout/{cutout_udp_sender,cutout_udp_receiver,cutout_eval}.py`; `scripts/run_cutout_demo.bat`.
+  - **A NEW wire message** on UDP **8903**: binary (a picture does not survive being text), a frame cut into datagrams that each carry
+    the whole 72-byte header, colour raw RGBA / JPEG / none, mask raw / deflate. The body (8899), hands (8901) and face (8902) wires are
+    unchanged. Documented byte by byte in `cutout_wire.py`; pinned by 26 golden datagrams (`tools/video/make_vision_fixtures.py`) the Unity
+    tests read.
+  - `tools/video/vision_sender.py` may now be given a LIST of datagrams per frame (the hands and face senders return one: unchanged).
+  - Measured here: 17 ms an engine frame for one person, 20-22 ms for two; the isolation of people halves the foreground outside their boxes
+    on the two-dancer clip and raises one-frame flicker from 1.75 % to 2.01 %. A webcam run of 11 s (numbers only): 29.3 fps, 0 datagrams
+    lost; it saw nobody. **A person on a live webcam is NOT tested.** A small selfie network: dark clothes on a dark background, floor
+    lights and people who touch are wrong in ways no flag fixes.
+  - 265 new assertions (`tests/test_cutout_{wire,matte,engine}.py` 201, the cutout part of `test_vision_fixtures.py` 48 and of
+    `test_vision_cli_contract.py` 16); 16 of 16 injected bugs caught.
+- **The Unity host's command lines are tested against the senders (H-04).** `tests/test_vision_cli_contract.py` parses the command-line
+  fixtures the Unity repo asserts with the hands and face senders' own argument parsers. No sender change.
+
+- **Fixtures for the Unity receivers (H-03).** `tools/video/make_vision_fixtures.py` writes golden hands and face datagrams, made by the
+  production encoders, into the Unity repo; `tests/test_vision_fixtures.py` fails if they drift. No wire change.
+
 - **Face only, no body (H-02).** A sibling of the hands pipeline for a camera that sees a face and no person. MediaPipe's face
   detector, 478-point face mesh and 52-score blendshape network, as community ONNX conversions of the TFLite models in
   `face_landmarker.task`, run on the existing `onnxruntime-directml` (**no new pip package**; `tools/model/fetch_face_models.py`

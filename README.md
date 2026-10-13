@@ -480,6 +480,37 @@ scripts/run_face_demo.bat                                         # double-click
 * **Provenance and limits:** the ONNX files are a third party's conversion (parity with Google's was not reproduced); **never run on a live camera** - see `docs/H02_FACE_ONLY_2026-10-13.md`
   (Unity repo) section 7 for the full NOT TESTED list. `--provider cpu` is as fast as DirectML for these small networks and has no 250 ms warm-up.
 * The entry point is in `tools/` (not shipped by a Unity build); the modules it drives are at the root and import nothing from `tools/`.
+* **Unity receivers (H-03):** the Unity repo has `Runtime/Vision` (`VirtualMirror.Vision`), which reads both wires and bridges to the existing hand and face providers. The wire is pinned by golden datagrams:
+  `python tools/video/make_vision_fixtures.py` rewrites them, `tests/test_vision_fixtures.py` checks them. Tested headless; not run in the Unity Editor or on a live camera.
+
+### Cutout — the person in the picture, isolated (S-01)
+
+A third sender for the Unity **cutout** (`tools/cutout/cutout_udp_sender.py`): it finds each person in the picture, cuts them out of their background with
+MediaPipe's selfie segmentation network, and sends **the picture and a soft person mask together**, one frame per picture, for Unity to draw as the camera, the
+person alone, or a one-colour silhouette. The segmenting is all here; Unity runs no model. Two small ONNX files and the person detector, on the existing onnxruntime-directml
+(**no new pip package**).
+
+```bash
+.venv/Scripts/python.exe tools/model/fetch_cutout_models.py      # once: the two selfie networks, 0.46 MB each, size and SHA-256 verified, not in version control
+.venv/Scripts/python.exe tools/model/fetch_yolox_s.py            # once, for one crop per person (without it the whole picture goes through one network)
+scripts/run_cutout_demo.bat                                       # double-click: webcam 0 with the demo window (the picture, the person cut out of it, the mask)
+.venv/Scripts/python.exe tools/cutout/cutout_udp_sender.py --video camera:0 --show
+.venv/Scripts/python.exe tools/cutout/cutout_udp_sender.py --list-cameras                      # which camera indices open
+.venv/Scripts/python.exe tools/cutout/cutout_udp_receiver.py --view                            # a second terminal: what a client of the wire sees, from the datagrams alone
+.venv/Scripts/python.exe tools/cutout/cutout_eval.py --video clip.mp4 --sheet out.jpg --sheet-times 8,25,45   # measure a clip, no camera, no socket
+```
+
+* **How:** detector (YOLOX-s) -> the F-32 tracker (stable ids, a person held 1.2 s through a missed detection) -> one SQUARE CROP per person with every other person's box painted out of it
+  (`--isolate`, on) -> the selfie network (256 x 256, or 256 x 144 for a 16:9 picture when nobody is detected) -> a max-merged canvas -> a matte (guided filter, temporal smoothing, an edge ramp
+  `--edge-low`/`--edge-high`, speck and pinhole cleanup). `--roi off` or no detector weights: the whole picture through one network.
+* **Wire:** a NEW binary message on **127.0.0.1:8903** (hands 8901, face 8902, body 8899 untouched), documented byte by byte in the docstring of `cutout_wire.py`. A frame is a 72-byte header (repeated on every datagram) plus the picture
+  (raw RGBA, JPEG, or none) and the mask (raw A8 or deflate), cut into `--chunk-bytes` pieces (60 000 on loopback, about 1 200 for a network). A newer frame abandons an unfinished older one; every size is capped.
+  `people` is the larger of the people tracked and the foreground groups; `mirrored` says the sender flipped the picture (`--flip`: leave it off, Unity mirrors on the GPU).
+* **Measured** (this machine, DirectML): 17 ms a frame for one person, 20-22 ms for two (detector + network + matte); a webcam run of 11 s, 29.3 fps, 117 MB/s on loopback, 0 datagrams lost, 12-20 ms from camera frame to packed
+  (the camera saw nobody: a person on a webcam is NOT tested). Numbers and contact-sheet findings: Unity repo `docs/S01_CUTOUT_2026-10-13.md`.
+* **Limits:** a ~0.5 MB selfie network applied once per person. Dark clothes on a dark background, bright floor lights, thin gaps between an arm and the body (filled), and two people who touch are wrong in ways no flag fixes; the outline flickers ~2 %.
+  The ONNX files are a third party's conversion of Google's models (`onnx-community` on Hugging Face; parity not reproduced). The entry point is in `tools/` (not shipped by a Unity build); the modules it drives are at the root.
+* **Unity:** `Runtime/Vision` receives it, `Showcase/Cutout` is the demo scene, the command line Unity builds is pinned by `Tests/EditMode/VisionFixtures/args_cutout_*.txt` and parsed by this sender's own argparse in `tests/test_vision_cli_contract.py`.
 
 ### Phase 1 — BlazePose on the OAK-D VPU (fallback)
 
@@ -533,6 +564,14 @@ after the ADR-065 reorganisation:
 .venv/Scripts/python.exe tests/test_face_tracking.py          # 46/46
 .venv/Scripts/python.exe tests/test_face_wire.py              # 36/36
 .venv/Scripts/python.exe tests/test_landmark_filters.py       # 11/11
+
+# S-01 cutout: the wire (round trips, reassembly under loss / reorder / repeat / restart / wrap, every malformed datagram), the matte, the engine (scripted detector + fake network),
+# the golden datagrams the Unity tests read, and the command lines Unity builds.
+.venv/Scripts/python.exe tests/test_cutout_wire.py            # 66/66
+.venv/Scripts/python.exe tests/test_cutout_matte.py           # 35/35
+.venv/Scripts/python.exe tests/test_cutout_engine.py          # 100/100 (+ one real-network check when the weights and clip are present)
+.venv/Scripts/python.exe tests/test_vision_fixtures.py        # 93/93 (the hands, face and cutout fixtures in the Unity repo)
+.venv/Scripts/python.exe tests/test_vision_cli_contract.py    # 36/36
 
 # Replay + adversarial against a real capture (needs a --log-dir from a session).
 .venv\Scripts\python.exe tools\diagnostics\evaluate_p1.py --dir <capture-dir>

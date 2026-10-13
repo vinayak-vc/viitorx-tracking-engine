@@ -68,6 +68,11 @@ the landmark contract, and leaves it byte-identical. See *Multi-person* below.
 | `face_geometry.py` | H-02 head pose (four landmarks) and position (eye-corner distance) | `head_pose`, `place_face` |
 | `face_wire.py` | H-02 the `kind:"face"` datagram: encode, parse, validate | `encode_message`, `parse_message` |
 | `face_overlay.py` | H-02 the demo window drawing | `render` |
+| `cutout_segmenter.py` | S-01 MediaPipe selfie segmentation network (two ONNX files), the square crop around a person, `blank_neighbours`. Stateless | `SelfieSegmenter.infer`, `square_roi`, `crop_square`, `paste_max`, `blank_neighbours` |
+| `cutout_matte.py` | S-01 probability map -> soft uint8 mask: guided filter, adaptive temporal smoothing, edge ramp, speck and pinhole cleanup | `MatteRefiner.update` |
+| `cutout_engine.py` | S-01 detector -> tracker -> one crop per person (others painted out) -> network -> canvas -> matte; whole-picture fallback | `CutoutEngine.update` |
+| `cutout_wire.py` | S-01 the binary chunked cutout frame (picture + mask) on UDP 8903: encode, reassemble, validate | `encode_datagrams`, `Assembler.add`, `parse_header` |
+| `cutout_overlay.py` | S-01 the demo window drawing | `composite`, `render` |
 
 Dependency direction is strictly **downward**: `wholebody_udp_sender` imports the others; none of them
 import it, and `joint_tracker.py` imports **nothing but `math`** so it stays unit-testable in isolation.

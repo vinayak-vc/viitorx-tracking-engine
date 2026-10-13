@@ -25,10 +25,13 @@ import argparse
 import json
 import sys
 
+import struct
+
 import numpy as np
 
 import _synthetic_face as SF
 import _synthetic_hand as SH
+import cutout_wire as CW
 import face_geometry as FG
 import face_tracking as FT
 import face_wire as FW
@@ -119,6 +122,93 @@ def face_message(faces, landmarks=FW.LANDMARKS_FULL):
     return FW.encode_message(faces, SESSION_FACE, SEQ, NOW, LATENCY, "camera", WIDTH, HEIGHT, CAMERA.focal_px, False, landmarks)
 
 
+#: S-01 cutout fixtures. The frame is small on purpose (16x12 picture, 8x6 mask) so a test can state every pixel, and the chunk size is the wire's
+#: minimum so even this frame is several datagrams. Pixel (x, y) of the picture is R = 16x, G = 20y, B = `fill`, A = 255; mask pixel (x, y) is
+#: 5 (x + 8y), which runs 0..235 and so has both ends of the range, a soft middle and a different value everywhere.
+CUTOUT_SESSION = 0xA1B2C3D4
+CUTOUT_OTHER_SESSION = 0x0BADF00D
+CUTOUT_SEQ = 1042
+CUTOUT_CHUNK = CW.MIN_CHUNK_BYTES
+
+#: An 8x8 baseline JPEG, stored as bytes so the fixture is the same on every machine whatever OpenCV build wrote it (the pixels are a gradient,
+#: B 200 - 20x, G 30y, R 40 + 25x + 5y; a decoder returns them within a few levels).
+_JPEG_8X8 = bytes.fromhex(
+    "ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b10"
+    "16101113141515150c0f171816141812141514ffdb00430103040405040509050509140d0b0d1414141414141414141414141414141414141414141414141414141414141414"
+    "141414141414141414141414141414141414ffc00011080008000803012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0b"
+    "ffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a2526272829"
+    "2a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5"
+    "b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405"
+    "060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f1"
+    "1718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6"
+    "a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00c9f087eca3f73f"
+    "d0ff00f1da28a2bf21e3ae27ccff00b66a7ef0fd2781789732fec6a7fbc3ffd9")
+
+
+def cutout_color(fill):
+    """The 16x12 raw RGBA picture of the fixtures."""
+    px = np.zeros((12, 16, 4), np.uint8)
+    px[:, :, 0] = (np.arange(16) * 16)[None, :]
+    px[:, :, 1] = (np.arange(12) * 20)[:, None]
+    px[:, :, 2] = fill
+    px[:, :, 3] = 255
+    return px.tobytes()
+
+
+def cutout_mask():
+    """The 8x6 raw mask of the fixtures: 5 (x + 8y)."""
+    return (np.arange(48) * 5).astype(np.uint8).tobytes()
+
+
+def cutout_frame(seq, session, fill):
+    """The 4-chunk reference frame: raw RGBA picture + raw mask, mirrored and live, two people at 32.1%."""
+    return CW.Frame(session, seq, NOW, 38.2, 12.5, CW.FLAG_MIRRORED | CW.FLAG_LIVE, CW.COLOR_RGBA, CW.MASK_RAW, CW.MODEL_GENERAL,
+                    16, 12, 8, 6, 321, 2, cutout_color(fill), cutout_mask())
+
+
+def _with(data, offset, fmt, value):
+    """`data` with one little-endian field overwritten: a malformed datagram made from a good one."""
+    b = bytearray(data)
+    struct.pack_into(fmt, b, offset, value)
+    return bytes(b)
+
+
+def cutout_fixtures():
+    """{file name: bytes} for the S-01 cutout wire: one datagram per file, named cutout_<family>_<chunk>.bin."""
+    out = {}
+
+    def add(family, datagrams):
+        for i, d in enumerate(datagrams):
+            out["cutout_%s_%02d.bin" % (family, i)] = d
+
+    add("rgba", CW.encode_datagrams(cutout_frame(CUTOUT_SEQ, CUTOUT_SESSION, 128), CUTOUT_CHUNK))
+    add("next", CW.encode_datagrams(cutout_frame(CUTOUT_SEQ + 1, CUTOUT_SESSION, 200), CUTOUT_CHUNK))
+    add("other", CW.encode_datagrams(cutout_frame(5, CUTOUT_OTHER_SESSION, 50), CUTOUT_CHUNK))
+
+    rectangle = np.zeros((24, 32), np.uint8)
+    rectangle[6:18, 8:24] = 255
+    add("maskonly", CW.encode_datagrams(CW.Frame(CUTOUT_SESSION, 2000, NOW, 10.0, 5.0, CW.FLAG_LIVE, CW.COLOR_NONE, CW.MASK_DEFLATE,
+                                                 CW.MODEL_LANDSCAPE, 0, 0, 32, 24, 250, 1, b"", CW.deflate_raw(rectangle.tobytes())), CUTOUT_CHUNK))
+    ramp = (np.arange(64) * 4).astype(np.uint8).tobytes()
+    add("jpeg", CW.encode_datagrams(CW.Frame(CUTOUT_SESSION, 3000, NOW, 20.0, 8.0, 0, CW.COLOR_JPEG, CW.MASK_RAW, CW.MODEL_GENERAL,
+                                             8, 8, 8, 8, 500, 1, _JPEG_8X8, ramp), CUTOUT_CHUNK))
+    # A header that is consistent, whose deflate stream inflates to MORE than the 32x24 it declares: refusing it is the decoder's job.
+    add("bad_inflate", CW.encode_datagrams(CW.Frame(CUTOUT_SESSION, 4000, NOW, 1.0, 1.0, 0, CW.COLOR_NONE, CW.MASK_DEFLATE, CW.MODEL_GENERAL,
+                                                    0, 0, 32, 24, 0, 0, b"", CW.deflate_raw(bytes(40 * 30))), CUTOUT_CHUNK))
+
+    first = out["cutout_rgba_00.bin"]
+    out["cutout_bad_magic.bin"] = b"XXXX" + first[4:]
+    out["cutout_bad_version.bin"] = _with(first, 4, "<B", 2)
+    out["cutout_bad_kind.bin"] = _with(first, 5, "<B", 9)
+    out["cutout_bad_header_len.bin"] = _with(first, 6, "<H", 60000)
+    out["cutout_bad_chunk_index.bin"] = _with(first, 32, "<H", 9)
+    out["cutout_bad_sizes.bin"] = _with(first, 60, "<I", 7)
+    out["cutout_bad_dimension.bin"] = _with(first, 48, "<H", CW.MAX_DIMENSION + 1)
+    out["cutout_bad_encoding.bin"] = _with(first, 45, "<B", 9)
+    out["cutout_truncated.bin"] = first[:40]
+    return out
+
+
 def synthetic_fixtures():
     """{file name: bytes} for every fixture that is a pure function of the encoders."""
     out = {}
@@ -172,6 +262,7 @@ def synthetic_fixtures():
         out[name] = json.dumps(m, separators=(",", ":")).encode("utf-8")
     out["bad_truncated.json"] = out["hands_two.json"][:600]
     out["bad_not_json.txt"] = b"this is not json at all"
+    out.update(cutout_fixtures())
     return out
 
 

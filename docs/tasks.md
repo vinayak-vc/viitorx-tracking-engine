@@ -5,6 +5,40 @@ Scope boundary: sensor → signal → datagram. See `../AGENTS.md` §2.
 
 ---
 
+## ✅ S-01 — Cutout: the person in a camera picture, isolated (2026-10-13) — BUILT, TESTED, SEEN WORKING FROM TWO VIDEO FILES IN UNITY; NOT TESTED ON A PERSON AT A WEBCAM
+
+Unity repo: `docs/S01_CUTOUT_2026-10-13.md` (the report), `docs/decisions.md` **ADR-103**, `docs/tasks.md` S-01, `Showcase/Cutout/README.md`. Wire: a NEW binary message on UDP **8903**; the body (8899), hands (8901) and face (8902) datagrams are untouched.
+
+- [x] `cutout_segmenter.py` (MediaPipe selfie network, two ONNX files, crop geometry, `blank_neighbours`), `cutout_matte.py` (guided filter, adaptive temporal smoothing, edge ramp, cleanup), `cutout_engine.py` (detector -> tracker -> one crop per person, the others painted out -> network -> canvas -> matte; whole-picture fallback), `cutout_wire.py`, `cutout_overlay.py`; `tools/cutout/{cutout_udp_sender,cutout_udp_receiver,cutout_eval}.py`; `tools/model/fetch_cutout_models.py` (exactly two files, size + SHA-256); `scripts/run_cutout_demo.bat`. No new pip package.
+- [x] Tests: `test_cutout_wire` 66, `test_cutout_matte` 35, `test_cutout_engine` 100, `test_vision_fixtures` 93 (26 cutout datagrams), `test_vision_cli_contract` 36. 16 of 16 injected bugs caught.
+- [x] Measured: 17 ms an engine frame (one person), 20-22 ms (two); isolation: foreground outside the people's boxes 0.69 % -> 0.30 %, one-frame flicker 1.75 % -> 2.01 % (two-dancer clip), no change for one person. Webcam 11 s, numbers only: 29.3 fps, 0 datagrams lost, 12-20 ms camera-to-packed, saw nobody.
+- [x] Dead ends, measured and dropped (report s.8): a learned-background veto (oracle median of the clip) and a per-person box prior; smoothing the painted boxes.
+- [ ] **NOT TESTED: a person on a live webcam**; a phone / LAN camera; JPEG / deflate / 1 200-byte chunks between two machines; a long soak.
+- [ ] If a wire field changes: edit `cutout_wire.py`, run `make_vision_fixtures.py`, run both suites, write the ADR in both repos. If a sender flag is renamed: update `VisionSenderArguments` in the Unity repo and `args_cutout_*.txt`; the contract test fails first.
+- [ ] Next: a person in front of a webcam, then the transition effect in Unity.
+
+## P-01 — Tracking Engine (compiled exe) and Unity packages: PLAN ONLY (2026-10-13)
+
+Plan: `docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md` (same text as the Unity repo's copy). **Nothing implemented.** This repo is planned to become `viitorx-tracking-engine` (renamed in place, history kept): a proper package, one CLI (`hands`, `face`, `body`, ...), no OAK-D in the compiled build (it stays an optional extra for Python users), a Nuitka standalone folder with `models/` beside the exe, `manifest.json`, and an Inno Setup installer.
+- [ ] Phase 1 first: the Nuitka compile spike (go / no-go). Phase 2: `WIRE.md`. Phase 3: extract the source handling from `tools/`, add `body`, `verify`, `--parent-pid`.
+- [ ] Move research (`evidence/`, harness `tools/`, `depthai_blazepose/`) out of the shipped layout.
+
+## ✅ H-04 — Unity hosts the hands and face senders (2026-10-13) — BUILT AND TESTED HEADLESS; NOT RUN IN PLAY MODE
+
+Unity repo: `docs/H04_VISION_BOOTSTRAP_AND_SHOWCASE_2026-10-13.md` (the report), `docs/decisions.md` **ADR-102**, `docs/tasks.md` H-04, `Showcase/HandsFace/README.md`. No sender or wire change: the Unity `VisionHost` starts `tools/hands/hands_udp_sender.py` and `tools/face/face_udp_sender.py` with flags built from its settings.
+- [x] `tests/test_vision_cli_contract.py` (20 assertions) parses the four command-line fixtures in the Unity repo (`Tests/EditMode/VisionFixtures/args_*.txt`) with the senders' own `build_parser()`.
+- [ ] **NOT TESTED: Unity starting these senders (the process, a live camera, stopping on scene exit).**
+- [ ] If a sender flag is renamed or removed: update `VisionSenderArguments` in the Unity repo and the `args_*.txt` fixtures; this test fails first.
+- [ ] Next: a combined hands + face sender, so one camera can feed both.
+
+## ✅ H-03 — Unity receivers for the hands and face wires (2026-10-13) — BUILT AND TESTED HEADLESS; NOT RUN IN THE EDITOR
+
+Unity repo: `docs/H03_UNITY_RECEIVERS_2026-10-13.md` (the report), `docs/decisions.md` **ADR-101**, `docs/tasks.md` H-03, `Runtime/Vision/README.md`. No wire change: the hands (8901) and face (8902) datagrams are read as they are.
+- [x] `tools/video/make_vision_fixtures.py` writes 22 golden datagrams with `hand_wire` / `face_wire` from the synthetic hands and faces into the Unity repo's `Tests/EditMode/VisionFixtures`; `--real` captures what the real networks emitted. `tests/test_vision_fixtures.py` (45 assertions) fails if the checked-in files drift from the encoders.
+- [x] The C# side: 86 tests pass headless, 36 of 36 injected bugs caught, 0 bytes allocated per parse (net9).
+- [ ] **NOT TESTED: the Unity Editor compile and Play mode of the scene components; a live camera; a rigged character.**
+- [ ] If a wire field changes: edit the encoder, run `make_vision_fixtures.py`, run both suites, write the ADR in both repos.
+
 ## ✅ H-02 — face only, 52 blendshapes (2026-10-13) — BUILT AND TESTED; NOT RUN ON A LIVE CAMERA
 
 Unity repo: `docs/H02_FACE_ONLY_2026-10-13.md` (the report), `docs/decisions.md` **ADR-100**, `docs/tasks.md` H-02. Wire: a NEW message `{ver:1, kind:"face"}` on UDP **8902**; the hands (8901) and body (8899) datagrams are untouched.
@@ -33,7 +67,8 @@ Unity repo: `docs/H01_HANDS_ONLY_2026-10-13.md` (the report), `docs/decisions.md
 - [x] No new pip package. `requirements*.txt` unchanged. `pyproject.toml` `py-modules` lists the six new modules.
 - [ ] **NOT TESTED: a live webcam, a phone, a LAN camera; depth against a ruler (`--hfov` is assumed); the L/R letter against a known hand; gesture and smoothing constants on real hands.**
 - [ ] Known limit: crossing hands can lock both crops onto one hand (ids may swap). Known limit: the entry point is in `tools/` because it reuses `video_udp_sender`'s source handling; `tools/` is not shipped in a Unity build.
-- [ ] Next: the Unity receiver; **H-02 face only with 52 blendshapes** (a second wire kind, port 8902); extract the source handling to a root module.
+- [x] The Unity receiver: done in H-03. H-02 face only: done above.
+- [ ] Next: extract the source handling to a root module.
 
 ---
 

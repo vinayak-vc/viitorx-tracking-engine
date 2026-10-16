@@ -20,7 +20,7 @@
 
 ## 2026-10-13: CUTOUT (S-01) - THE PERSON IN THE PICTURE, ISOLATED
 
-A third sender and a NEW wire. `cutout_segmenter.py` + `cutout_matte.py` + `cutout_engine.py` + `cutout_wire.py` + `cutout_overlay.py` at the root; the entry `tools/cutout/cutout_udp_sender.py` (webcam, LAN camera, stream, file; the frame loop is the shared `tools/video/vision_sender.py`); the wire is a binary chunked frame (the picture + a soft person mask) on UDP **8903**, documented byte by byte in `cutout_wire.py` and pinned by 26 golden datagrams written into the Unity repo's `Tests/EditMode/VisionFixtures` (`make_vision_fixtures.py`; `test_vision_fixtures.py` checks drift). The networks are MediaPipe's selfie segmenter as two ONNX files (`tools/model/fetch_cutout_models.py`, exactly two URLs, size + SHA-256); the detector and tracker are the existing YOLOX-s and F-32 `PersonTracker`; **no new pip package**. Report: Unity repo `docs/S01_CUTOUT_2026-10-13.md`; ADR-103. Unity renders it (`Runtime/Vision`, `Showcase/Cutout`) and runs NO model.
+A third sender and a NEW wire. `cutout_segmenter.py` + `cutout_matte.py` + `cutout_engine.py` + `cutout_wire.py` + `cutout_overlay.py` at the root; the entry `tools/cutout/cutout_udp_sender.py` (webcam, LAN camera, stream, file; the frame loop is the shared `tools/video/vision_sender.py`); the wire is a binary chunked frame (the picture + a soft person mask) on UDP **8903**, documented byte by byte in `cutout_wire.py` and pinned by 26 golden datagrams written into the Unity repo's `Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures` (`make_vision_fixtures.py`; `test_vision_fixtures.py` checks drift). The networks are MediaPipe's selfie segmenter as two ONNX files (`tools/model/fetch_cutout_models.py`, exactly two URLs, size + SHA-256); the detector and tracker are the existing YOLOX-s and F-32 `PersonTracker`; **no new pip package**. Report: Unity repo `docs/S01_CUTOUT_2026-10-13.md`; ADR-103. Unity renders it (`Runtime/Vision`, `Showcase/Cutout`) and runs NO model.
 
 **How it works in one line.** detector -> tracker -> a square crop per person with the others' boxes painted out (`--isolate`) -> selfie network -> max-merged canvas -> matte -> uint8 mask + the picture, one frame, chunked over UDP.
 
@@ -28,19 +28,19 @@ A third sender and a NEW wire. `cutout_segmenter.py` + `cutout_matte.py` + `cuto
 
 ## 2026-10-13: PACKAGING PLAN (P-01) - PLAN ONLY
 
-See `docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md`. This repo is planned to become the Viitorx Tracking Engine (compiled `viitorx-tracking.exe`, no `.py` files shipped, models beside it, startup file check, Inno Setup installer). Nothing here has changed yet. A GitHub token was pasted into a chat: it must be revoked, never stored.
+See `docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md`. This repo is planned to become the Viitorx Tracking Engine (compiled `viitorx-tracking.exe`, no `.py` files shipped, models beside it, startup file check, Inno Setup installer). **Status 2026-10-16: phases 0-4 done** (compile spike GO, wire spec `docs/WIRE.md`, engine package `viitorx_tracking/`, compiled build + installer in `build/`; plan sections 10-13). Read plan section 13 for what is measured and what is NOT TESTED (installer never run, `fetch-models` frozen over the network, clean machine, LAN WebRTC). Next: phase 5, the Unity packages. Original note: Nothing here has changed yet. A GitHub token was pasted into a chat: it must be revoked, never stored.
 
 ## 2026-10-13: UNITY HOSTS THE SENDERS (H-04)
 
 No sender behaviour changed. The Unity repo's AppBootstrap now starts the hands and face senders itself (a `VisionHost`, launched through its `SidecarProcessLauncher` in `DirectSenderOnly` mode), from a settings section and an F6 control panel; two sample scenes in `Showcase/HandsFace`. See Unity `docs/H04_VISION_BOOTSTRAP_AND_SHOWCASE_2026-10-13.md` and ADR-102.
-New here: `tests/test_vision_cli_contract.py` (20 assertions): the command lines Unity builds (`Tests/EditMode/VisionFixtures/args_*.txt`) must be accepted by `hands_udp_sender.build_parser()` and `face_udp_sender.build_parser()` and land in the fields they are named for.
+New here: `tests/test_vision_cli_contract.py` (20 assertions): the command lines Unity builds (`Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures/args_*.txt`) must be accepted by `hands_udp_sender.build_parser()` and `face_udp_sender.build_parser()` and land in the fields they are named for.
 
 **Carry forward:** renaming or removing a sender flag breaks Unity's launch silently (Python exits before the camera opens); the contract test fails first. One camera feeds one sender: the hands and face senders cannot read the same webcam or LAN viewer together. **NOT TESTED:** Unity starting these senders; a live camera.
 
 ## 2026-10-13: UNITY RECEIVERS (H-03)
 
 No sidecar behaviour changed. The Unity repo gained `Runtime/Vision` (assembly `VirtualMirror.Vision`) that reads the hands (8901) and face (8902) wires; see Unity `docs/H03_UNITY_RECEIVERS_2026-10-13.md` and ADR-101.
-New here: `tools/video/make_vision_fixtures.py` (writes 22 golden datagrams with the production encoders into the Unity repo's `Tests/EditMode/VisionFixtures`; `--real` captures `real_hands.json` / `real_face.json` from the networks) and `tests/test_vision_fixtures.py` (45 assertions, fails on drift).
+New here: `tools/video/make_vision_fixtures.py` (writes 22 golden datagrams with the production encoders into the Unity repo's `Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures`; `--real` captures `real_hands.json` / `real_face.json` from the networks) and `tests/test_vision_fixtures.py` (45 assertions, fails on drift).
 
 **Carry forward:** a wire change = encoder + regenerate fixtures + both suites + ADR in both repos. The C# parser reads `ver`, then `kind`, as soon as it sees them and refuses an unknown version, so bump `ver` for an incompatible change. **NOT TESTED:** the Unity Editor compile and Play mode; a live camera; a rigged character.
 

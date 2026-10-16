@@ -217,3 +217,237 @@ stages the files flat anyway.
 **Measured, and different from the phase 1 sum:** `run` with all three streams on `123.webm` (1080x1920, decoded in the same process) held **18.6 fps** (186 frames in 10 s), against 27.6 fps predicted from the per-frame processing times alone: **decoding a 1080x1920 file is not free**, and the loop is single-threaded. A webcam at 720p decodes faster; not measured here.
 
 **Not done (open):** a model shape check for replaced models (only size and hash are compared); `body` inside `run` (it is a pass-through with its own loop, no `VTSTATUS`, no `--parent-pid`); `--parent-pid` while waiting for a live source is noticed after the source's read timeout (a few seconds); the engine was never run on a live camera, a LAN-camera session or in the frozen build (phase 4); pip packaging (the senders' helper modules under `tools/` are not shipped by `pyproject.toml`); threads per pipeline to recover frame rate.
+
+## 13. Phase 4 result (compiled build and installer), 2026-10-16
+
+**Done in the engine repo (`python-sidecar~`, branch `package-v1`): `build/` (`build_engine.py`, `installer.iss`, `requirements-build.txt`, `README.md`), `tests/test_build.py`, `tests/verify_build.py`, `.github/workflows/engine-release.yml`.**
+Build environment: Python 3.10, Nuitka 4.3, MSVC 14.3, Inno Setup 6 (all on this machine).
+
+| Piece | What it is |
+|---|---|
+| `build_engine.py check / stage / compile / assemble / installer / all` | Reads the syntax trees of `viitorx_tracking/` and everything it reaches (44 modules; lazy imports included), refuses ambiguous module names, relative imports and packages the build Python lacks (`depthai` is the one allowed absentee), copies them FLAT into `stage/`, runs Nuitka standalone with the engine package included whole and `docs/` as data, then `assemble`: `LICENSE`, `THIRD_PARTY_NOTICES.txt` (generated from package metadata and the model registry), `models/README.txt`, `manifest.json`, a zip with its SHA-256. Nothing in the repository is changed by a build. |
+| `installer.iss` | Inno Setup: Program Files, **administrator once**, `models\` writable by every user, registry `HKLM\Software\Viitorx\TrackingEngine\InstallDir` and the machine variable `VIITORX_TRACKING_ENGINE`, unchecked option to run `fetch-models`, uninstall removes everything, fixed `AppId` so a later setup upgrades in place. Unsigned. |
+| `requirements-build.txt` | The 41 pinned packages that end up in the folder (equal to `requirements.lock.txt` where both list one, minus `depthai`). |
+| `.github/workflows/engine-release.yml` | Builds on a clean `windows-latest`, runs the GPU-free tests and a smoke run, attaches the zip and the installer to a release for a tag `engine-v*`. **NOT TESTED**: never run on GitHub. |
+
+**Amendment to section 3 (a decision of mine, small and reversible):** the installer puts the engine in Program Files, a place section 3's discovery order does not list. So it records the install in the registry and in the machine environment variable `VIITORX_TRACKING_ENGINE` (step 2 of the order). A host started before the install does not see a new variable until it restarts; the registry value is always current. **Phase 5's locator should read the registry value as well.**
+
+**Measured:**
+- Compile: **348 s cold** (6 jobs, 500 C files, no cache), **180 s** for the rebuild after a change. Output: folder **345 MB (137 files)**, zip **125 MB**, installer **85.7 MB**. Largest parts: `cv2` 98 MiB, `av.libs` 62, `onnxruntime` 45, `numpy.libs` 36, the exe 36, `directml.dll` 18. **Nothing was trimmed**: `TRIM` is empty because no removal has been measured safe (opencv's own FFmpeg next to PyAV's is the candidate; a file or URL source may use it).
+- `tests/test_build.py` **99/99**; mutation check **20 of 21** injected breakages caught (the 21th, `[0] * 4` to `[0] * 3`, is equivalent: every real version has at least one part). Four first survived (a tautological test, a missing short-version case, a stage that kept old files, one mutant text that did not apply) and got sharper tests.
+- `tests/verify_build.py` against the real folder: **65/65** (final run, on the final folder; its zip SHA-256 changes with every build). The folder has no `.py` / `.pyc`, the Visual C++ runtime beside the exe, a manifest that matches every file. Every command and exit code of ENGINE.md behaves frozen: version, print-spec, verify, `fetch-models --check` (exit 1 on an empty folder), missing model exit 21 with the command that fixes it (no repository script named), missing file exit 2, unknown command exit 2, `--parent-pid` of a dead process exit 0. **The file check on a copy of the folder:** a file with one byte appended is exit 20 with its name (`av.libs/avcodec-62-...dll`), a deleted one is exit 20 `MISSING`, `--no-verify` starts anyway, an extra file, a file in `models\` and a missing `manifest.json` are not errors; no stack trace in any case.
+- Real runs of the compiled exe on the 1080x1920 clip (idle GPU, RTX 3060, decoding included, flat out): `hands` 71 fps, `face` 56 fps, `cutout` 26.7 fps, `run` with all three **19.5 fps**, `body` 25.7 fps at the start. Every network runs on DirectML in the frozen build. Every datagram parses; cutout frames reassemble with nothing refused; the VTSTATUS lines are `starting, ready, stopping` with the engine version.
+- **Parity, source vs compiled, whole clip (`--no-loop`): the counts are identical** (hands, face, cutout 775 each; body 775 frames, 590 sent, 185 skipped, anchors 503/59/28 in both). **The values are not byte-equal, and two runs of the SOURCE are not either**: source against source, 41.7 % of the hands messages, 0.8 % of the face messages and 18.2 % of the cutout masks differ (hands: 98.3 % of messages have the same fields; cutout worst mean grey-level difference 3.9); compiled against source: 42.7 %, 0.8 % and 17.7 % (97.9 % same fields; worst 1.5). The compiled build differs from the source no more than the source differs from itself. A real difference is seen by the same test: with the clip flipped, 100 % of the face and hands messages differ. **The cause of the run-to-run variation is not isolated** (suspect: each frame is stamped with the wall clock, which the filters and the re-detect schedule read). Phase 1's "outputs match" was a count comparison; this is the first value comparison.
+- Windows Defender: no detection recorded for the engine (`Get-MpThreatDetection` empty after the new build and every run above). Other products and SmartScreen not tested.
+
+**Not done (open):**
+- **The installer was compiled but never RUN.** It needs administrator rights and changes system settings (Program Files, HKLM, the machine environment); that is for the user to do. Steps: run `viitorx-tracking-setup-0.1.0.exe`, tick the models box, then `& "$env:ProgramFiles\Viitorx\TrackingEngine\viitorx-tracking.exe" verify`, then check `$env:VIITORX_TRACKING_ENGINE` in a NEW shell, then uninstall and see that the folder and the registry key are gone.
+- **`fetch-models` was never run in the compiled exe against the network** (the models here were already present; a real download is about 49 MB from the registry's URLs). The TLS libraries are in the folder; whether the frozen download works is unproven.
+- No clean Windows machine (no Windows Sandbox / Hyper-V here): the exe ran with `PATH` cut to the Windows folders (no Python reachable), but this machine has the Visual C++ runtime installed system-wide.
+- A real WebRTC LAN-camera session, a webcam, SmartScreen, antivirus other than Defender, signing.
+- `body` stays a pass-through (no `VTSTATUS`, no `--parent-pid`) and does not exit when a file ends (it stays alive and silent, as the script always did); not in `run`.
+- pip packaging (`pip install`-able layout) is deferred: nothing in the plan's gates needs it, and the compiled build does not.
+- Size trimming, the model shape check, threads per pipeline (all as in section 12).
+
+## 14. Phase 5 design (Unity packages), 2026-10-16
+
+Read-only survey of the Unity repo on 2026-10-16 (nothing moved yet). It answers: what each package takes, what has to be cut apart first, and how this project keeps compiling while it happens.
+
+### 14.1 What the code looks like today
+
+- 16 runtime assemblies. **`VirtualMirror.Core`** (37 files, references nothing) holds the pose / hand / face / crowd frames, the provider interfaces, the humanizer and the avatar / camera interfaces. **`VirtualMirror.Vision`** (39 files, references only Core) holds the three wire parsers, the receivers, the providers, the hands / face / cutout views, the blendshape driver, `VisionSettings`, `VisionSenderArguments` and the cutout shaders.
+- **`VirtualMirror.Tracking`** (20 files) is one assembly that mixes three things: the OAK-D / video body provider (`OakDUdpPoseProvider`, `TrackingStreamHealth`), the sidecar process code (`SidecarLocator`, `SidecarPaths`, `SidecarProcessLauncher`, `SidecarGuards`, `SidecarSingleInstanceLock`, `SidecarStatusModel`, `VideoSourceSpec`), and two older in-Unity inference paths (`MediaPipe/` needs `Mediapipe.Runtime`, `Sentis/` needs `Unity.InferenceEngine`). Its asmdef references `Mediapipe.Runtime`, `Unity.InferenceEngine`, `Newtonsoft.Json` and **`Utility`**.
+- **The sidecar code is self-contained:** it uses only `ILogService` (Core), `Newtonsoft.Json` (`SidecarStatusModel`) and one outside type, **`Modules.Utility.NativeProcess`** (`Assets/Modules/Utility/StartExternalProcess.cs`, 993 lines, which also needs `Modules.Utility.Utility`). That is the one real extraction: the package must carry its own copy.
+- **`VisionHost`, `VisionControlPanel`, `CutoutStreamBinder` sit in `VirtualMirror.App`** (the AppBootstrap assembly). `VisionHost` takes `ILogService` and `VisionSettings` and names `AppBootstrap` only in comments, so it moves cleanly. `VisionControlPanel` names AppBootstrap in label text only. `CutoutStreamBinder` uses `AppBootstrap.Instance`: that one is the AppBootstrap binding and stays app-side (the package gets a binder that takes the host directly).
+- **Cutout is not separable by folder alone:** `VisionSettings`, `VisionSenderArguments` and `UdpDatagramReceiver` mention cutout. The settings and the sender arguments (data) stay in `.vision`; the wire, assembler, receiver, textures, look, view and shaders move to `.cutout`.
+- The tests are one assembly (`VirtualMirror.Tests`, 55 files) covering everything; they have to be split per package.
+- The repository root is both a UPM package (`cloud.viitor.virtual-mirror`) and a folder inside `Assets/Games/` of this project, so today its files are compiled as assets. The Unity Editor is open on this project right now (project lock held), so batch mode cannot open it: compile and tests run headless through the generated csproj files as in `headless-unity-verification`.
+
+### 14.2 The split (assembly names unchanged unless stated)
+
+| Package | Takes | Needs |
+|---|---|---|
+| `...tracking.core` | all of `Runtime/Core` | nothing |
+| `...tracking.sidecar` | `Sidecar*` (6 files), `VideoSourceSpec`, a vendored copy of `NativeProcess` + the helpers it uses, the engine locator of plan section 3 (adds the registry value and `VIITORX_TRACKING_ENGINE`, today it only finds `Assets/Games/<game>/python-sidecar~`) | core, `com.unity.nuget.newtonsoft-json` |
+| `...tracking.vision` | the rest of `Runtime/Vision` without cutout, `VisionHost`, `VisionControlPanel`, a `VisionBootstrap` for projects without AppBootstrap, `Samples~` hands and face scenes | core, sidecar |
+| `...tracking.cutout` | the cutout wire / receiver / textures / look / view, the two shaders, a binder that takes the host, `Samples~` cutout scene | vision, `com.unity.render-pipelines.universal` |
+| `...tracking.body` | body provider (`OakDUdpPoseProvider`, health), Retargeting, Avatar, IK, the Kalidokit solver, the body host | core, sidecar, UniVRM, Animation Rigging; NOT `MediaPipe/` or `Sentis/` |
+| `...tracking` | metapackage | the five above |
+
+Kept out of every package (as agreed): Human Echo, Chromatic Rain, Fluid Disruption, the Launcher, AppBootstrap, `Showcase.Shared`, FluXY. They stay the sample application.
+
+### 14.3 What has to be cut apart before anything moves
+
+1. **Sidecar out of `VirtualMirror.Tracking`:** a new assembly with its seven files; `Tracking` references it. Nothing else changes for callers (namespace `VirtualMirror.Tracking.OakD` kept, so no `using` changes elsewhere).
+2. **`NativeProcess` vendored:** copy under its own namespace into the sidecar package so this project never has two `Modules.Utility.NativeProcess`; the original in `Assets/Modules/Utility` stays untouched. The tests of `SidecarProcessLauncher` must still pass against the copy.
+3. **`VisionHost`, `VisionControlPanel` out of `VirtualMirror.App` into the vision assembly** (App then references Vision, which it already does).
+4. **Cutout out of `VirtualMirror.Vision`** into its own assembly that references Vision; `VisionSettings` / `VisionSenderArguments` keep the cutout data.
+5. **Body:** `MediaPipe/` and `Sentis/` leave `VirtualMirror.Tracking` (into an assembly of their own that stays in the app, not in a package), so the package assembly stops referencing `Mediapipe.Runtime` and `Unity.InferenceEngine`.
+6. **Tests split** per package with `Tests~` / `Tests` asmdefs, and the golden-datagram fixtures (`Tests/EditMode/VisionFixtures`) move with the vision package.
+
+### 14.4 How this project keeps compiling, and how "another project can use it" is proven
+
+- A file move keeps its `.meta`, so every GUID (scenes, prefabs, scriptable objects) stays valid. Assembly names stay `VirtualMirror.*`: renaming them would touch every asmdef and gains nothing now.
+- **Recommendation:** the packages live in `Packages/` at the repository root (as in section 4); in THIS project they are ordinary assets (the folder is inside `Assets`), so nothing in the project changes except where files sit. **The proof that the packages work in another project is a fresh, empty Unity 6000.3 project outside this one, whose `manifest.json` points at the package folders (`file:`), compiled and tested in batch mode** (it holds no lock). That is phase 6's dogfood, in a form that needs nothing from the Assets copy.
+- Making THIS project consume the packages through `manifest.json` would need the folders hidden from the Assets import (a name ending in `~`) and is not needed for the proof; it is a choice for the user (question asked 2026-10-16).
+
+### 14.5 Order
+
+5a: core, sidecar, vision, cutout, the vision bootstrap and samples, per-package tests, a fresh-project compile. 5b: body + umbrella. A gate (compile every assembly headless, all existing tests, a mutation check on moved logic, no GUID changed) after each step; the existing test counts are the baseline.
+
+### 14.6 Risks
+
+- A mass move while the Editor is open makes it reimport and recompile; a GUID lost to a missing `.meta` breaks a scene silently. Gate: every moved file's `.meta` moves with it and `git status` shows renames, no deletions.
+- The package folders inside `Assets` and a second copy referenced from a manifest would give duplicate assembly names: never do both in one project.
+- `.body` pulls in UniVRM (`com.vrmc.vrm`, not on Unity's registry) and Animation Rigging: its `package.json` can declare only registry packages; UniVRM must be installed by the user from its own source (documented), exactly as today.
+- Headless compile uses generated csproj files (explicit file lists, gitignored): a new assembly needs its csproj by hand until the Editor regenerates it.
+
+## 15. Phase 5a result (core, sidecar, vision, cutout extracted), 2026-10-16
+
+The user's answers of 2026-10-16: packages in `Packages/` as ordinary assets in this project with a fresh test project as the proof; assembly names stay `VirtualMirror.*`; the Editor stays open (it reloads on each move).
+
+**Done (Unity repo, branch `package-v1`):** four packages under `Packages/`, every file moved with its `.meta`.
+
+| Package | Assembly | Holds | Depends on |
+|---|---|---|---|
+| `com.viitorx.avtar.tracking.core` | `VirtualMirror.Core` | all of the former `Runtime/Core` | nothing |
+| `com.viitorx.avtar.tracking.sidecar` | `VirtualMirror.Sidecar` (NEW, namespace `VirtualMirror.Tracking.OakD` kept) | `Sidecar*` (6 files) and `VideoSourceSpec` out of `VirtualMirror.Tracking`; a vendored copy of `NativeProcess` (`VirtualMirror.Sidecar.Native`, from `Assets/Modules/Utility`, which is untouched) | core, Newtonsoft |
+| `com.viitorx.avtar.tracking.vision` | `VirtualMirror.Vision` | the former `Runtime/Vision` (parsers, receivers, providers, views, blendshape driver, settings, and the cutout WIRE / assembler / receiver / textures) plus `VisionHost` and `VisionControlPanel` (they were in the AppBootstrap assembly) | core, sidecar |
+| `com.viitorx.avtar.tracking.cutout` | `VirtualMirror.Cutout` (NEW, namespace `VirtualMirror.Vision` kept) | `CutoutView`, `CutoutLook` and the two URP shaders | vision, `com.unity.render-pipelines.universal` 17.3.0 |
+
+**One refinement of section 14:** the cutout's transport (wire, assembler, receiver, textures) stays in `.vision` and only its rendering (view, look, shaders) is `.cutout`, because `VisionHost` runs the cutout receiver and the plan's other direction (cutout depends on vision) would otherwise be a cycle. `VirtualMirror.Tracking` lost its reference to `Utility`; `App`, `SkeletonShow`, `Editor`, `Tests` and `CutoutShowcase` gained references to the new assemblies; nothing else in the application changed.
+
+**Tests split per package** (`Tests/Editor/` in each, assemblies `VirtualMirror.<X>.Tests`): core 18, sidecar 96, vision 186 (with the 112 golden-datagram fixtures and `conformance.json`), cutout 20. The Python side follows: `tools/video/make_vision_fixtures.py` `FIXTURE_DIR` now points to `Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures`; `test_vision_fixtures` 93/93, `test_vision_cli_contract` 36/36, `test_wire_spec` 64/64 pass against it. `VisionFixtures` reads next to its OWN file now (it read next to the caller, which broke for tests of another package: found by the real Unity run).
+
+**Path map (old to new)** for anyone reading older documents: `Runtime/Core` to `Packages/com.viitorx.avtar.tracking.core/Runtime`; `Runtime/Vision` to `Packages/com.viitorx.avtar.tracking.vision/Runtime` (cutout view, look and shaders: `...cutout/Runtime`); `Runtime/Tracking/OakD/Sidecar*.cs`, `VideoSourceSpec.cs` to `...sidecar/Runtime`; `Runtime/Bootstrap/VisionHost.cs`, `VisionControlPanel.cs` to `...vision/Runtime/Host`; `Tests/EditMode/VisionFixtures` and the vision / cutout / sidecar / core tests to the packages' `Tests/Editor`.
+
+**Verified:**
+- A GUID inventory (every `.meta` of the repository) before and after: **796 GUIDs before; none lost, none duplicated, no orphan metas; 182 moved, 39 new** (folders and the new package files).
+- Every one of the 38 assemblies of the repository compiles (csproj files generated from the file system, `dotnet build`, so the open Editor's own project files are not relied on); a deliberate compile error is caught by the same harness.
+- The headless minimal runner (the one with the known ECall / missing-module failures) gives **the same result before and after, test for test: 517 passed, 97 failed, 2 skipped, identical failing set** (80 `ECall`, 17 missing UnityEngine modules: environmental). The 517 are now spread over five test assemblies.
+- **A real Unity 6000.3.9f1 run in a FRESH, empty project** (`D:\viitorx-package-test`, outside this repository): its `manifest.json` references the four packages by `file:` (copies of the package folders), URP and Newtonsoft come from the registry; `-runTests -testPlatform EditMode` over the four package test assemblies: **320 of 320 passed** (core 18, sidecar 96, vision 186, cutout 20), no compile error. This includes the 80 tests the headless runner cannot run (`VisionHostTests`, which need real UnityEngine) and the cutout view / textures tests, which need a GPU: **with `-nographics` two classes failed for that reason (the JPEG read-back and the view tests, 18 failures); with the GPU enabled all pass.** The first run also found the fixture-path bug above.
+- Mutation check: the real-Unity run failed 17 tests when the fixture path was wrong and passed when fixed; the harness failed on a deliberate compile error. No mutation check of the moved logic itself: the code was not changed, only moved (plus the vendored copy of `NativeProcess` with its namespace and one log call changed).
+
+**Not done in 5a (next, in this order):**
+1. The engine in the sidecar package: today the launcher still starts the Python source tree (`python-sidecar~`); the locator of section 3 (setting, `VIITORX_TRACKING_ENGINE`, registry `InstallDir`, per-user install, StreamingAssets, download of the pinned release with SHA-256), starting `viitorx-tracking.exe <stream> ...` with `--parent-pid`, and the one-process `run --stream` mode in the host. The pinned release does not exist yet (nothing is published): the pin stays data, empty until a release is made.
+2. A `VisionBootstrap` for projects without AppBootstrap and the `Samples~` (hands, face, cutout scenes), then the real-Unity run of a sample in the fresh project.
+3. `.body` and the umbrella package (5b).
+4. `AppBootstrap`'s Vision section and the documents that name old paths were not rewritten (Python docs were).
+
+**Known / to decide:** the repository root is still a UPM package (`cloud.viitor.virtual-mirror`, all-in-one, `package.json` unchanged). A project must NOT install it together with these four packages (duplicate assembly names). The all-in-one package's future (keep, or retire it when 5b and phase 6 are done) is the user's call.
+
+## 16. Phase 5b result (the engine in the Unity packages), 2026-10-16
+
+The user said yes to the engine integration. Two steps, as proposed: (1) find the compiled engine and start it per stream, (2) one process for several streams.
+
+**Done:**
+
+| Where | What |
+|---|---|
+| `...sidecar` | `EngineLocator` / `EngineLocation` (pure, every disk access through three delegates): the order of section 3 with the machine-wide install added: settings path (or the Python project), `VIITORX_TRACKING_ENGINE`, registry `InstallDir`, `%LOCALAPPDATA%\Viitorx\TrackingEngine\<version>` (highest version, or the pinned one exactly), `StreamingAssets/Viitorx/TrackingEngine`, last the Python source tree. A settings path that does not hold the engine is an ERROR, never a reason to try the next place; a bad environment value is only noted. `EngineRegistry` (advapi32). `SidecarLocator.ResolveEngine`. `SidecarProcessLauncher` starts `viitorx-tracking.exe <command> <options> --parent-pid <Unity's pid>` (no model path: the engine finds `models\` beside itself); the Python and supervisor paths are unchanged. |
+| `...vision` | `VisionSettings` has an Engine section (`EnginePath`, `UsePythonProject`, `PythonProjectPath`). `VisionHost` locates the engine at each launch and says which one in the F6 panel (`EngineDescription`) and the log; no engine is a clear error naming every place looked at. **One process, one camera:** when two or more streams are wanted and the engine is the compiled one, the host starts ONE `viitorx-tracking run --video ... --stream hands ... --stream face ... --stream cutout ...` (`VisionSenderArguments.Run`); a change in the wanted set restarts it, one stream left goes back to its own process, a Python project is never given the combined command (the Python senders have no `run`). |
+| engine | `--flip` is now PER STREAM in `run` (plan section 12 had it as a source option): the camera is read and rotated once, a stream that wants the mirror gets its own mirrored copy. Needed because hands and face mirror (selfie view) and the cutout does not (Unity mirrors it on the GPU) while all three share one camera. `_build_streams` now validates every stream against the others BEFORE loading any model. |
+| fixtures | `args_run_default.txt`, `args_run_custom.txt` (written by `tools/video/make_run_fixtures.py` from the single-stream fixtures): the combined line must configure each stream EXACTLY as its own line does. |
+
+**Verified:**
+- Real Unity 6000.3.9f1, fresh project, GPU on: **368 of 368** (core 18, sidecar 127, vision 203, cutout 20). That includes tests that start the REAL compiled engine (`D:\viitorx-engine-build\viitorx-tracking`) from `VisionHost` on a real clip: hands, face and cutout arrive in Unity's receivers from ONE process (`viitorx-tracking.exe` count +1, not +3), the process count is back to what it was after `Dispose`, and turning the face off leaves hands streaming (it goes back to its own process).
+- Python: `test_engine` 123/123 (9 new: per-stream flip with scripted pipelines, `mirror_copy`, the conflict check), `test_vision_cli_contract` 54/54 (18 new: the combined fixtures parsed with the engine's own splitter and the senders' parsers; every stream's namespace equals its single-stream line's), `test_wire_spec` 64/64, `test_vision_fixtures` 93/93, `test_build` 99/99.
+- Mutation checks: engine flip logic **9 of 9** caught; locator and launcher **12 of 13** (the survivor is equivalent: a file existing implies its folder exists); the host's combined mode **7 of 7** in REAL Unity (one by a hang: dropping `StopGroup()` from `Dispose` leaves four engine processes running and Unity does not exit; one first survived and the Python-project test was strengthened).
+- Headless runner against the baseline: **no old test changed result**; 11 new tests fail there for the known reason (real UnityEngine needed) and pass in real Unity. GUIDs: 796 before, **0 lost**, 0 duplicates.
+- Found by the real runs, not by the headless ones: `Microsoft.Win32.Registry` is not in Unity's default .NET Standard 2.1 profile (the registry read is raw advapi32 now); `VisionFixtures` must read next to its own file.
+
+**Not done / open:**
+- **The download of the pinned release** (`EngineInstaller`: download, SHA-256, extract to `%LOCALAPPDATA%\Viitorx\TrackingEngine\<version>`, run `verify`) is not written. No release exists, so there is nothing to pin; it needs a decision on the URL.
+- **`VisionBootstrap`** (the host for projects without AppBootstrap) and the **`Samples~`** scenes; `.body` and the umbrella package (5c); the documents that name old paths.
+- **Not tried:** a real webcam or LAN camera through the combined mode (only a video file); the installer-written registry value (the key does not exist until the installer has run: the read is tested on a value every Windows has); an install under `Program Files` (the stand-in tests run from a temp folder whose path contains a space); the one-process mode on a GPU with the user's own app running.
+- `VisionHost` still lives in the namespace `VirtualMirror.App` although its assembly is `VirtualMirror.Vision` (kept so no `using` changes); `AppBootstrap`'s Vision section is unchanged and now shows the three engine fields.
+
+## 17. Phase 5c result (VisionBootstrap and the samples), 2026-10-16
+
+**Done:**
+
+| Where | What |
+|---|---|
+| `...vision` | **`VisionBootstrap`**: one component that owns the `VisionSettings` (the whole Inspector), creates the `VisionHost`, ticks it, adds the F6 panel and disposes it; a second one is refused and removed so the first keeps the ports. **`VisionHostRegistry`**: where a scene finds the host (AppBootstrap registers its host there too, two lines). **`VisionHostClient`**: base of a component that asks the host for streams (it binds when the host appears, lets go on disable or when the host goes away). `UnityDebugLogService`. The F6 key is compiled only where the legacy Input Manager is on (`ENABLE_LEGACY_INPUT_MANAGER`), so a project on the Input System package alone still compiles and runs. |
+| `...vision` `Samples~/HandsAndFace` | `HandsAndFaceSample` (hands skeletons, face point cloud and head axes, status box; one engine process for both), its asmdef, README and a built scene. |
+| `...cutout` `Samples~/Cutout` | `CutoutSample` (buttons for mode and backdrop; keys 1-3 with the legacy Input Manager), its asmdef, README, a built scene and the two materials. |
+| both `package.json` | the `samples` entries the Package Manager shows under Samples. |
+
+**How the sample scenes were made, and why that matters:** a scene refers to its scripts by GUID, and the Package Manager's Import copies `Samples~` with its metas. So the sample scripts' metas are FIXED in the package (deterministic), the scenes are built by code (`SampleSceneBuilder`, outside the packages) in the fresh test project after importing the samples the way the Import button does, and the generated `.unity`, `.mat` and metas are copied back. Checked: every GUID in the scenes and materials resolves to a file of the packages (scripts, shaders, materials), no missing script.
+
+**Verified:**
+- Real Unity, fresh project: the new Play-mode assembly `VirtualMirror.Vision.PlayTests` **9 of 9** (host created and registered, panel bound, receivers listening, ports freed on destroy, a second bootstrap refused, a client that wakes first binds later, disable/enable of a client, a client follows its host away and to the next).
+- **The samples were imported with the Package Manager's own API** (`UnityEditor.PackageManager.UI.Sample.Import`, what the Import button calls: both samples found, imported to `Assets/Samples/Viitorx Tracking Vision/0.1.0/Hands and Face` and `.../Viitorx Tracking Cutout/0.1.0/Cutout`), and **the imported scenes played with the REAL compiled engine and a video file: 3 of 3.** Hands and face scene: 5+ hands and 5+ face messages, exactly one `viitorx-tracking.exe` process more than before, the sample's `Hands` and `Face` views exist; cutout scene: 5+ cutout frames, the mask texture has person pixels, the view built its quad; and both scenes load with no engine and the host says "not found" (no hands arrive).
+- Mutation checks in real Unity: **9 of 9** caught on the bootstrap, client and registry (one first survived: nothing asserted that the panel is bound; a test was added).
+- The earlier suites are unchanged (core 18, sidecar 127, vision 203 with the host tests, cutout 20 = 368 in real Unity; headless baseline: no old test changed result). All Play-mode tests together: 12 of 12 (9 bootstrap + 3 sample). Running them together found a test-isolation fault of MINE, twice: a VisionBootstrap survives scene loads by design (`dontDestroyOnLoad`) and a sample scene stays loaded after its test, so the next test saw a registered host and a client asking for streams. Both test classes now remove them first.
+
+**Not done / open:** `.body` and the umbrella package (5d); the download of a pinned release (no release exists); the samples were never run against a real webcam or the Editor's Game view by a person (only Play-mode tests with a clip: what they LOOK like on screen is not checked); the hands/face sample does not draw an avatar (by design); documents that name old paths; the sample scene builder and the sample Play-mode tests live in `D:\viitorx-engine-spike\unity-tools` (outside the repositories).
+
+## 18. Phase 5d result (the body package and the umbrella), 2026-10-16
+
+**Done:**
+
+| Where | What |
+|---|---|
+| `...tracking.body` | NEW package. Moved with their GUIDs: `Runtime/Tracking` (`VirtualMirror.Tracking`: `OakDUdpPoseProvider`, `TrackingStreamHealth`, joint filter, fake providers), `Runtime/Retargeting`, `Runtime/Avatar`, `Runtime/IK`. New: `Runtime/Host` (`VirtualMirror.Body`: `BodyBootstrap`, `BodyAvatarDriver`), `BodySettings` and `BodyEngineArguments` (in `VirtualMirror.Tracking`), an Editor assembly with the UniVRM warning, sample *Body Avatar* (`Samples~`, scene + a 180 KB humanoid VRM as a `.bytes` asset). |
+| `VirtualMirror.Tracking.Inference` | NEW application-side assembly: `MediaPipe/` and `Sentis/` left `VirtualMirror.Tracking`, so the package references neither `Mediapipe.Runtime` nor `Unity.InferenceEngine`. `VirtualMirror.App` references it. |
+| `...tracking` (umbrella) | NEW package with no code: names core, sidecar, vision, cutout and body at 0.1.0; README with the install steps, UniVRM and the engine. |
+| core / vision | `UnityDebugLogService` moved from vision to core (namespace `VirtualMirror.Core`). |
+| engine repo | `tools/video/video_udp_sender.py`: the argparse parser extracted into `build_parser()` (no behaviour change); `tests/test_body_cli_contract.py` (16 assertions) parses the body command-line fixtures with it. |
+
+**Decisions** (ADR-106): UniVRM is optional at compile time through `defineConstraints` + `versionDefines` (`VIITORX_UNIVRM`); `BodyAvatarDriver` is a COPY of the application's Kalidokit path, not a shared class (the application's per-frame avatar path could not be verified with the Editor holding the project, so it was not touched); the umbrella only pins versions.
+
+**Verified:**
+- Headless against the ORIGINAL committed code (git export, same runner, 12 test assemblies): all 843 original tests still exist, none went from passing to failing; the only new failures headless are 11 tests that need a real Unity or the engine.
+- Real Unity, fresh project, **WITHOUT UniVRM**: zero compile errors; `VirtualMirror.Body`, `.Retargeting` and `.Avatar` are not built, `Tracking` and `IK` are; 405 edit-mode tests pass (core 18, sidecar 127, vision 200 + 3 ignored, cutout 20, tracking 40); the Editor logs the one warning.
+- Real Unity, fresh project, **WITH UniVRM 0.126.0** (local copies, no download) and Animation Rigging 1.4.1: edit mode **529 of 529** with the engine environment set (526 passed and 3 ignored without it): core 18, sidecar 127, vision 203, cutout 20, tracking 40, retargeting 121. Play mode also `VirtualMirror.Vision.PlayTests` 9 of 9 (37 of 37 together).
+- Play mode, `VirtualMirror.Body.PlayTests`: **35 of 35** (44 of 44 with `Vision.PlayTests`): a real VRM loaded through UniVRM with its control rig, driven by a fake provider (both upper arms move, hip follow with scale, no follow when out of range with the reason in the log, neutral retaken, unbinding stops every bone, an avatar without the control rig refused with the reason), `BodyBootstrap` lifecycle (port held and freed, second bootstrap refused, avatar replaced and destroyed under any parent, a late load leaves nothing, engine missing / source unusable reported with no process, tilt published), and **the real compiled engine**: `BodyBootstrap` starts `viitorx-tracking body` on a clip, the stream goes Live (20+ datagrams, 0 refused), the avatar's upper arm leaves the T-pose by 89.9 degrees, exactly one engine process more, and none after the bootstrap is destroyed.
+- The imported Body Avatar sample scene (Package Manager `Sample.Import`) played with the real engine and the clip: Live, avatar posed (89.0 degrees), and with no engine the avatar loads, stands in its T-pose and the status says "engine: not found". Samples run: 5 of 5 (re-run at the end: see below) (the two earlier samples regenerated with the same builder and played again). One frame of the scene was saved and looked at: a blocky humanoid in a mid-motion pose in front of the camera, whole figure in view.
+- Mutation checks: command line **24 of 24** caught headless (the one survivor, an empty depth interval, got its own test and is caught); engine path 3 of 3 (one only because the leaked engine process hangs Unity, not by an assertion); driver and bootstrap in Play mode **15 of 19**. The 4 survivors: removing the `!IsBound` early return in `BodyAvatarDriver.Update` (no observable difference, the unbound control rig ignores the pose: equivalent), removing the `IsPoseStale` guard (unobserved), the `destroyed` branch of `LoadAvatarAsync` and `lifetime.Cancel()` (each is covered by the other: cancellation stops a load, the flag disposes a late one; neither alone changes what a test can see). The run also exposed a test of mine that proved nothing (the port-freed check bound 127.0.0.1, which succeeds while a wildcard receiver holds the port); fixed, and the provider-dispose mutant is now caught. Python: `test_body_cli_contract` 16/16.
+
+**Added after the report (body datagram tests, `Tests/Runtime/BodyWirePlayTests.cs`):** real body-wire datagrams (docs/WIRE.md section 6: 33 `lm` points, `lh`/`rh`, `xyz`, `seq`, `sid`, `t`) sent over loopback UDP to a `BodyBootstrap` with a real VRM. 7 tests: arms at the sides put the avatar's upper arms down (below -45 degrees), raising them brings them back to level, a fist of the LEFT hand curls only the left fingers (then only the right), `TrackHands = false` moves no finger, a stream that stops reaches `StaleFailsafe` after 2 s and the avatar is eased to its T-pose, a stream that returns is followed again, and the driver announces each stall and each recovery once (two stalls, two of each). Mutation: 7 mutants of the failsafe, release, hands switch and finger apply, 5 caught at first; of the 2 survivors one (recovery flag) got the per-stall log test and is caught together with its twin, the other (applying a frame during a failsafe) is equivalent because the receiver returns no frame while the stream is stale.
+
+**Added after the Editor was closed (2026-10-16): the engine rebuilt, and the application's avatar path measured against the package's.**
+- Engine rebuilt with `build_parser()` in the body sender (191 s, nuitka cache reused): zip sha256 `33e57b12...bf25`, installer sha256 `d3dc8565...d618` (the installer was built, not run); `verify_build.py` against the new folder **65/65**; `test_build` 99, `test_engine` 123, `test_vision_cli_contract` 54, `test_wire_spec` 64, `test_body_cli_contract` 16.
+- **The measurement** (`Tests/PlayMode/AppBootstrapWireEquivalencePlayTests.cs` in the application's repo, a permanent test; real Unity batch run on the main project): the real `AppBootstrap` (scene "Mirror", production values: tilt 6 degrees) and `BodyBootstrap` get the SAME body-wire datagrams over UDP with the same VRM; 24 bones are compared at 0.4 s into and at the end of five phases (arms down, arms out, left fist, right fist, arms down). The application's settings file is moved aside and put back. **Result: 0.00 degrees on every bone in every phase between the application and the package, and 0.00 between two package runs.** The sequence is static poses (no walking, no fast motion), so this proves the settled and the converging pose, not dynamics.
+- **It also found a real bug in the package.** With a correctly handed person (their LEFT side at +X of the camera picture) the application's arms go OUT from the body, the package's CROSSED the chest. Cause: the retargeting works in the avatar's model frame and binds to the avatar as it stands; the application turns every avatar 180 degrees on load (`AvatarSessionController`, before the control rig binds), `BodyBootstrap` did not. My earlier tests used a datagram with left and right swapped and only compared arm elevation, so they could not see it. Fix: `BodySettings.AvatarYawDegrees` (180), applied before `Bind`; the camera of the sample moved to -Z. New tests: arms held out go out and not across (35 -> 37 body play tests), and with yaw 0 they cross (the setting matters). The wire sender now uses the real camera handedness.
+- After the fix: Body play tests **37/37**, samples **5/5** (rebuilt scenes, one saved frame looked at: the figure is large because the person in the clip walks toward the camera and the avatar follows the hip), edit mode **529/529**, `Vision.PlayTests` 9/9, GUIDs 0 lost / 0 orphans.
+
+**Not done / open:**
+- `BodyAvatarDriver` and `AppBootstrap` still carry the same orchestration twice, but they are now MEASURED equal for static poses. Merging means moving the application's per-frame code (filter for non-OAK providers, debug skeleton, diagnostics, face, the legacy FK/IK path, about forty serialized tunables) behind the driver; the new test is the safety net for it. It is a refactor of the production path with no new behaviour: a decision, not a gap.
+- The wrist path (`ApplyWrist`, weight 0 by default) and the `IsPoseStale` guard are unobserved by any test.
+- Nothing was run with a real webcam or a LAN camera; the body model (185 MB) is not shipped or downloaded by `fetch-models` (no URL): a user must place it. Depth is estimated.
+- The umbrella resolves only when the family is reachable from a registry or the manifest; to my knowledge Unity does not read git URLs inside a package's dependencies (not tested). No registry, no release, no tag exists.
+- The packages were never installed from a git URL, a registry or a second machine. The OpenUPM scoped-registry text in the READMEs was not run (UniVRM came from local copies to avoid a download).
+- `docs/H-0x`, `S-01` and other documents that name old paths are still not rewritten.
+- The engine was not rebuilt after the `build_parser()` extraction (the compiled folder is functionally the same); rebuild at the next release.
+
+## 19. Release preparation (phase 7, first part), 2026-10-17
+
+The merge of `BodyAvatarDriver` with `AppBootstrap` was skipped by decision; this is the release work that needed no decision from the owner and no push.
+
+**Done:**
+
+| Where | What |
+|---|---|
+| engine: `build/build_engine.py` | `assemble` writes `viitorx-tracking-<version>-win-x64.release.json` (schema, version, platform, file, `url` = `--base-url` + file name or empty, `sha256` and `sizeBytes` of the zip, `unpackedBytes`, `topFolder`, `exe`, `wireSpec`); `--base-url`; `test_build` 106/106 |
+| engine: `.github/workflows/engine-release.yml` | a step that fails when the tag is not `engine-v<__version__>`; `--base-url=` built from `github.repository` and the tag (passed as `--base-url=$base` because PowerShell 5.1 drops an empty quoted argument); the descriptor is uploaded and attached. YAML parsed; **never run on GitHub** |
+| `...sidecar` | `EngineRelease` (the descriptor, parsed as untrusted input), `EngineInstaller` (download over https, or loopback http for tests; a zip on disk; size and SHA-256 checked BEFORE anything is unpacked; unpack into a temporary folder with entry, size, count and path-length checks; `version --json` must name the descriptor's version; move into `%LOCALAPPDATA%\Viitorx\TrackingEngine\<version>`, where the locator already looks; nothing left on failure or cancel), `EngineProbe`, `EngineCompatibility`, the Editor menu *Tools > Viitorx > Tracking Engine > Install From Release File...* (assembly `VirtualMirror.Sidecar.Editor`; uses a zip saved beside the descriptor instead of downloading) |
+| `...vision`, `...body` | `VisionHost` (one stream and several) and `BodyBootstrap` ask the engine once (`version --json`, remembered per file) and REFUSE one whose wire spec major number differs from the one these packages read (1), with a message; an exe that cannot answer is not blocked (starting it reports what is wrong) |
+| every package | `Third Party Notices.md` (Kalidokit MIT, One Euro filter, UniVRM / Animation Rigging / Newtonsoft as required-not-contained, the sample avatar); the umbrella got the `LICENSE.md` it lacked; `...cutout` declares `...core` (its assembly references it) |
+| `tools/release/` | `release_check.py` (the gate: one version, dependencies exactly that version, the umbrella names exactly the other five, README / CHANGELOG heading / LICENSE equal to the repository's / notices, a `.meta` for everything Unity imports and none orphaned, no GUID twice, every assembly reference resolves inside the package or to a declared dependency, UniVRM only under a define constraint, nothing from the application, no leftovers, no path of a developer's machine; `--release` also fails on "(unreleased)"), `bump_version.py` (`bump` / `finalize`) and their tests (38 and 18) |
+| docs | `docs/INSTALL.md` (user), `docs/RELEASING.md` (maintainer: the gate, cutting both releases, three ways to host the packages with what each needs, what is not done), the engine's `ENGINE.md` and `build/README.md` (the descriptor), `docs/README.md` (where code moved: old path -> new), the current-facing documents that named moved paths rewritten (architecture, overview, the vision README, WIRE.md, roadmap); the dated reports keep the paths of their day |
+
+**Verified (real Unity, fresh project, UniVRM, the real engine release):**
+- Edit mode **565 of 565** (core 18, sidecar 162, vision 204, cutout 20, tracking 40, retargeting 121; no ignored test: the engine environment was set); play mode **47 of 47** (body 38, vision 9); samples **5 of 5**; the umbrella project **179 of 179**.
+- **The real engine zip** (125 MB) was served from a loopback server, verified, unpacked, started once and moved into place, through the API and through the menu's offline path (the zip beside the descriptor); the locator finds it. A descriptor naming another version than the engine's is refused; an exe that exits 1 on `version --json` is refused; every wrong download (SHA, size, truncated, longer than said, 404, announced length) installs nothing and leaves nothing.
+- **Found by running in Unity, not by the headless runner:** (1) cancelling a download that waits for data did not stop it (Mono's HttpClient ignores the token in a pending read): the stream is now closed on cancel, and the catch accepts the exceptions that raises; (2) the engine has 112-character paths and a long install root exceeded Windows' 260: the temporary folder name is short and the unpack refuses, with the length and the limit in the message, instead of failing in the middle.
+- **The gate found, on the real packages:** the umbrella had no `LICENSE.md`; `...cutout` used core's assembly without declaring it. (Rewriting the moved paths also showed that the vision README still said its tests lived in the application; they moved in phase 5a.)
+- Mutation: installer and descriptor 24 of 24 headless (3 first survivors got tests), the path-length check caught headless, and the cancel pair (the stream closed on cancel; the exception filter) 2 of 2, which only Unity can show; compatibility 6 of 6 headless, host 3 of 3 and body 1 of 1 in Unity; the gate 30 of 30 rules (the first run let 5 survive: tests that matched another rule's message, made specific).
+
+**Not done / open:**
+- **Nothing is pushed, tagged or published.** No install from a git URL or a registry has been run; `docs/INSTALL.md` says so. The workflow has never run on GitHub; the installer (.exe) was never run.
+- **The installer never met a real release**: no release exists, so the `url` of the descriptor has never pointed at a real server, and https was not exercised (loopback http only).
+- The packages' registry question is open (git URLs / OpenUPM / own registry: `docs/RELEASING.md`). Unity does not, to my knowledge, install the umbrella's siblings from git URLs.
+- Engine and packages are matched by the wire spec MAJOR only; code signing is a release decision; there is no CI for the Unity suites (they need a licensed Unity and, for some tests, a GPU); the gate could run anywhere Python does.
+- The `fetch-models` download in the frozen exe, the real webcam / LAN camera runs, a clean machine and the Unreal plugin are as before.

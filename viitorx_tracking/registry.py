@@ -45,7 +45,7 @@ _TABLE = (
 GROUPS = ("hands", "face", "cutout", "person", "body")
 
 
-class ModelSpec(object):
+class ModelSpec:
     __slots__ = ("group", "name", "url", "size", "sha256", "required")
 
     def __init__(self, group, name, url, size, sha256, required):

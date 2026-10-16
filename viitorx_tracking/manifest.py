@@ -64,7 +64,7 @@ def write(root, engine_version):
     return manifest
 
 
-class Problem(object):
+class Problem:
     """One finding of `check`: kind is 'missing', 'modified' or 'unexpected'."""
     __slots__ = ("kind", "path")
 

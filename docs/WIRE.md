@@ -4,7 +4,7 @@
 Canonical copy: this file, in the engine repo. The code that defines each wire is named at the top of its section; **`tests/test_wire_spec.py` fails if this file and that code disagree**
 (field names, offsets, ports, the 52 blendshape names), so a change to a wire has to change the encoder, this file and the fixtures together.
 
-Nothing here has been run against a receiver written in a language other than C# and Python. The Unity receivers (`Runtime/Vision`) and the Python reference receivers
+Nothing here has been run against a receiver written in a language other than C# and Python. The Unity receivers (the package `Packages/com.viitorx.avtar.tracking.vision` of the Unity repository) and the Python reference receivers
 (`tools/*/..._udp_receiver.py`, `hand_wire.parse_message`, `face_wire.parse_message`, `cutout_wire.Assembler`) are the only two implementations checked against it.
 
 ## 1. Streams
@@ -238,7 +238,7 @@ The multi-person senders send `persons` and also republish the most-established 
 
 ## 7. Receiving in an engine with another convention
 
-**Unity** (what `Runtime/Vision` does, tested): flip `y` of every position, `wl` and the head rotation (y up, left-handed); conjugate the head rotation by the y reflection; leave image landmarks in image space (y down).
+**Unity** (what the Unity vision package does, tested): flip `y` of every position, `wl` and the head rotation (y up, left-handed); conjugate the head rotation by the y reflection; leave image landmarks in image space (y down).
 **Unreal** (derived from the axes, **not implemented or tested**): X forward = wire Z, Y right = wire X, Z up = minus wire Y, metres x 100 for centimetres; build rotations in the same mapped basis.
 In any engine: do the conversion once, at parse time, and keep image coordinates (`lm`) in image space.
 
@@ -246,7 +246,7 @@ In any engine: do the conversion once, at parse time, and keep image coordinates
 
 A receiver is conformant for a stream when it passes the **golden datagrams** and the checklist below.
 
-**Files** (in the Unity repo, `Tests/EditMode/VisionFixtures/`, written by the production encoders from synthetic subjects of known pose; regenerate with `tools/video/make_vision_fixtures.py`; `tests/test_vision_fixtures.py` fails if they drift):
+**Files** (in the Unity repo, `Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures/`, written by the production encoders from synthetic subjects of known pose; regenerate with `tools/video/make_vision_fixtures.py`; `tests/test_vision_fixtures.py` fails if they drift):
 
 | Files | What they pin |
 |---|---|

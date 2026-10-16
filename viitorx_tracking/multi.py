@@ -20,7 +20,7 @@ from . import exitcodes
 MAX_CONSECUTIVE_ERRORS = 30
 
 
-class Stream(object):
+class Stream:
     """One pipeline and where it sends. `args` is that stream's parsed argparse namespace (it supplies host, port and the stream's own flags)."""
 
     def __init__(self, tag, args, pipeline, session_id, wire_label, window_name):
@@ -46,6 +46,24 @@ def _vsnd():
     return vision_sender
 
 
+def stream_flip(common, stream):
+    """Whether this stream wants the picture mirrored: its own `--flip`, or the common one when its namespace has none."""
+    return bool(getattr(stream.args, "flip", common.flip))
+
+
+def shared_flip(common, streams):
+    """The flip applied while the frame is oriented (once, for everyone): the value every stream agrees on, else none. A stream that wants the other
+    way gets its own mirrored copy (`mirror_copy`). Hands and face want a selfie mirror; the cutout does not (Unity mirrors it on the GPU), and all
+    three share one camera."""
+    wanted = set(stream_flip(common, s) for s in streams)
+    return wanted.pop() if len(wanted) == 1 else False
+
+
+def mirror_copy(frame):
+    """The frame mirrored left to right, as `cv2.flip(frame, 1)` (a contiguous copy: the pipelines may write into what they are given)."""
+    return frame[:, ::-1].copy()
+
+
 def run_many(common, streams, stop, status, parent_watch=None, open_source=None, orient=None, print_fn=None, clock=time.time, perf=time.perf_counter):
     """The whole sender around `streams`. `common` holds the shared source options (video, rotate, flip, crop, loop, realtime, seconds, show, ...).
     Returns the process exit code. `stop` is a lifecycle.StopSignal; `status` a lifecycle.StatusEmitter; the rest are injectable for tests."""
@@ -54,6 +72,7 @@ def run_many(common, streams, stop, status, parent_watch=None, open_source=None,
     open_source = open_source if open_source is not None else vs.open_source
     orient = orient if orient is not None else vs.VS.orient_frame
     tags = ",".join(s.tag for s in streams)
+    base_flip = shared_flip(common, streams)
 
     status.emit("starting", streams=[s.tag for s in streams], video=vs.VS.redact(common.video))
     try:
@@ -138,13 +157,23 @@ def run_many(common, streams, stop, status, parent_watch=None, open_source=None,
 
             if common.crop:
                 frame = frame[common.crop[1]:common.crop[3], common.crop[0]:common.crop[2]]
-            frame = orient(frame, common.rotate, common.flip)
+            frame = orient(frame, common.rotate, base_flip)
+            mirrored_frame = None
+            views = {}
             for s in streams:
                 if s.dropped:
                     continue
+                wants = stream_flip(common, s)
+                if wants == base_flip:
+                    view = frame
+                else:
+                    if mirrored_frame is None:
+                        mirrored_frame = mirror_copy(frame)
+                    view = mirrored_frame
+                views[s.tag] = view
                 t0 = perf()
                 try:
-                    result = s.pipeline.process(frame)
+                    result = s.pipeline.process(view)
                     cost_ms = (perf() - t0) * 1000.0
                     s.infer_ms = cost_ms if s.frames == 0 else 0.9 * s.infer_ms + 0.1 * cost_ms
                     s.frames += 1
@@ -152,7 +181,7 @@ def run_many(common, streams, stop, status, parent_watch=None, open_source=None,
                         s.with_result += 1
                     s.seq += 1
                     now = clock()
-                    ctx = vs.SendContext(s.session_id, s.seq, now, (now - t_grab) * 1000.0, kind, frame.shape[1], frame.shape[0], common.flip)
+                    ctx = vs.SendContext(s.session_id, s.seq, now, (now - t_grab) * 1000.0, kind, view.shape[1], view.shape[0], wants)
                     payload = s.pipeline.to_bytes(s.pipeline.encode(result, ctx))
                     addr = (s.args.host, s.args.port)
                     if isinstance(payload, (bytes, bytearray)):
@@ -182,8 +211,8 @@ def run_many(common, streams, stop, status, parent_watch=None, open_source=None,
                 for s in streams:
                     if s.dropped:
                         continue
-                    hud = vs.Hud(0.0, s.infer_ms, kind, common.flip, s.sent)
-                    cv2.imshow(s.window_name, s.pipeline.render(frame, [], hud))
+                    hud = vs.Hud(0.0, s.infer_ms, kind, stream_flip(common, s), s.sent)
+                    cv2.imshow(s.window_name, s.pipeline.render(views.get(s.tag, frame), [], hud))
                 if (cv2.waitKey(1) & 0xFF) in (27, ord("q")):
                     break
 

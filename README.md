@@ -33,6 +33,7 @@ The sidecar owns everything from the sensor up to the UDP datagram. Unity owns e
 | File | Purpose |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | rules for AI agents working here + the **repo responsibility boundary** |
+| [`build/README.md`](build/README.md) | **building the compiled engine and its installer** (Nuitka, Inno Setup, manifest, zip + SHA-256) |
 | [`docs/ENGINE.md`](docs/ENGINE.md) | **the `viitorx-tracking` command line**: hands / face / cutout / body, `run` (one camera, several streams), `fetch-models`, `verify`, exit codes, status lines |
 | [`docs/WIRE.md`](docs/WIRE.md) | **the wire specification** (body, hands, face, cutout): fields, versioning, conformance checklist |
 | [`docs/project-overview.md`](docs/project-overview.md) | what this repo is and is not |
@@ -512,7 +513,7 @@ scripts/run_cutout_demo.bat                                       # double-click
   (the camera saw nobody: a person on a webcam is NOT tested). Numbers and contact-sheet findings: Unity repo `docs/S01_CUTOUT_2026-10-13.md`.
 * **Limits:** a ~0.5 MB selfie network applied once per person. Dark clothes on a dark background, bright floor lights, thin gaps between an arm and the body (filled), and two people who touch are wrong in ways no flag fixes; the outline flickers ~2 %.
   The ONNX files are a third party's conversion of Google's models (`onnx-community` on Hugging Face; parity not reproduced). The entry point is in `tools/` (not shipped by a Unity build); the modules it drives are at the root.
-* **Unity:** `Runtime/Vision` receives it, `Showcase/Cutout` is the demo scene, the command line Unity builds is pinned by `Tests/EditMode/VisionFixtures/args_cutout_*.txt` and parsed by this sender's own argparse in `tests/test_vision_cli_contract.py`.
+* **Unity:** `Runtime/Vision` receives it, `Showcase/Cutout` is the demo scene, the command line Unity builds is pinned by `Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures/args_cutout_*.txt` and parsed by this sender's own argparse in `tests/test_vision_cli_contract.py`.
 
 ### Phase 1 — BlazePose on the OAK-D VPU (fallback)
 
@@ -575,6 +576,10 @@ after the ADR-065 reorganisation:
 # The engine package (viitorx_tracking): registry, manifest, fetch-models, lifecycle, the one-source multi-stream loop, the CLI and its exit codes, and a real 3-stream run read off the wire
 # (VT_SKIP_REAL=1 skips that last, slow part).
 .venv/Scripts/python.exe tests/test_engine.py                 # 113/113
+# The build scripts and the installer script (the closure of the flat stage, the Nuitka command, the zip, the manifest, installer.iss; compiled by Inno Setup when installed):
+.venv/Scripts/python.exe tests/test_build.py                   # 99/99
+# A REAL build (needs build/build_engine.py all first, the models, a clip and the GPU): files, commands, the file check, real runs, parity with the source:
+.venv/Scripts/python.exe tests/verify_build.py <build-folder>  # 65/65
 .venv/Scripts/python.exe tests/test_cutout_matte.py           # 35/35
 .venv/Scripts/python.exe tests/test_cutout_engine.py          # 100/100 (+ one real-network check when the weights and clip are present)
 .venv/Scripts/python.exe tests/test_vision_fixtures.py        # 93/93 (the hands, face and cutout fixtures in the Unity repo)

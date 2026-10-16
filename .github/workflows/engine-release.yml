@@ -1,0 +1,83 @@
+# Builds the compiled Viitorx Tracking Engine (folder zip + installer) on a clean Windows runner and, for a tag `engine-v*`, attaches both to a GitHub release.
+# NOT TESTED: written from build/README.md, never run on GitHub. The first run is expected to need adjustments (runner image tools, Nuitka's first-use downloads).
+# It deliberately runs only what needs no GPU and no model files: tests/test_build.py, tests/test_engine.py (VT_SKIP_REAL=1) and a smoke run of the built exe.
+# tests/verify_build.py (real runs on a clip, parity with the source) needs a GPU and the models and is run by hand before a release.
+name: engine-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["engine-v*"]
+
+permissions:
+  contents: write   # to attach files to the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Build environment
+        shell: pwsh
+        run: |
+          python -m venv buildenv
+          buildenv\Scripts\python -m pip install --upgrade pip
+          buildenv\Scripts\python -m pip install -r build\requirements-build.txt
+          buildenv\Scripts\python -m pip install nuitka==4.3 ordered-set zstandard
+
+      - name: Tests that need no GPU and no models
+        shell: pwsh
+        env:
+          VT_SKIP_REAL: "1"
+        run: |
+          buildenv\Scripts\python tests\test_build.py
+          buildenv\Scripts\python tests\test_engine.py
+
+      - name: The tag names this version
+        if: startsWith(github.ref, 'refs/tags/engine-v')
+        shell: pwsh
+        run: |
+          $version = (buildenv\Scripts\python -c "from viitorx_tracking import __version__; print(__version__)").Trim()
+          if ("${{ github.ref_name }}" -ne "engine-v$version") { throw "the tag ${{ github.ref_name }} is not engine-v$version (viitorx_tracking.__version__)" }
+
+      - name: Compile, assemble, installer
+        shell: pwsh
+        run: |
+          $base = ""
+          if ("${{ github.ref }}".StartsWith("refs/tags/engine-v")) { $base = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}" }
+          buildenv\Scripts\python build\build_engine.py all --out build\out --jobs 4 --base-url=$base
+
+      - name: Smoke test of the built exe
+        shell: pwsh
+        run: |
+          build\out\viitorx-tracking\viitorx-tracking.exe version --json
+          build\out\viitorx-tracking\viitorx-tracking.exe print-spec | Select-Object -First 3
+          build\out\viitorx-tracking\viitorx-tracking.exe fetch-models --check --models-dir build\out\empty-models
+          if ($LASTEXITCODE -ne 1) { throw "fetch-models --check on an empty folder should exit 1, got $LASTEXITCODE" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: viitorx-tracking-engine
+          path: |
+            build/out/viitorx-tracking-*-win-x64.zip
+            build/out/viitorx-tracking-*-win-x64.zip.sha256
+            build/out/viitorx-tracking-*-win-x64.release.json
+            build/out/viitorx-tracking-setup-*.exe
+            build/out/viitorx-tracking-setup-*.exe.sha256
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/engine-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/out/viitorx-tracking-*-win-x64.zip
+            build/out/viitorx-tracking-*-win-x64.zip.sha256
+            build/out/viitorx-tracking-*-win-x64.release.json
+            build/out/viitorx-tracking-setup-*.exe
+            build/out/viitorx-tracking-setup-*.exe.sha256

@@ -1,8 +1,7 @@
 # Viitorx Tracking Engine: the command line (`viitorx_tracking`)
 
 One program, several subcommands, for any host. It reads a camera, a LAN camera, a stream or a file and sends the tracking wires of [`WIRE.md`](WIRE.md) over UDP.
-Today it runs from the source tree (`python -m viitorx_tracking <command>` with the sidecar's `.venv`); the compiled `viitorx-tracking.exe` (phase 4) is the same code
-behind the same command line.
+It runs from the source tree (`python -m viitorx_tracking <command>` with the sidecar's `.venv`) or as the compiled `viitorx-tracking.exe` (a folder, built by `build/build_engine.py`, see [`../build/README.md`](../build/README.md)): the same code behind the same command line.
 
 ```text
 viitorx-tracking hands   [options]     the hands wire  (UDP 8901)
@@ -39,13 +38,17 @@ and gives every frame to every stream, each sending to its own port:
 viitorx-tracking run --video camera:0 --flip --stream hands --port 8901 --max-hands 2 --stream face --port 8902 --stream cutout --port 8903
 ```
 
-- Everything before the first `--stream` is a **source option** (`--video`, `--rotate`, `--flip`, `--crop`, `--loop`, `--realtime`, `--seconds`, `--show`, `--camera-size`, `--camera-fps`, `--cache-dir`); it is set once.
-  A source option repeated with a different value inside a stream is refused. `--port` is a stream's own option, set after its `--stream`.
+- Everything before the first `--stream` is a **source option** (`--video`, `--rotate`, `--crop`, `--loop`, `--realtime`, `--seconds`, `--show`, `--camera-size`, `--camera-fps`, `--cache-dir`); it is set once.
+  A source option repeated with a different value inside a stream is refused (before any model is loaded). `--port` is a stream's own option, set after its `--stream`.
+- **`--flip` is per stream**, not a source option: the camera is read and rotated once and a stream that wants the mirror gets its own mirrored copy (hands and face want a selfie mirror,
+  the cutout does not: Unity mirrors it on the GPU). Streams that agree share one frame; each datagram is encoded with its own stream's mirror flag. One stream alone behaves exactly as before.
 - After `--stream NAME` come that stream's own options (`--max-hands`, `--max-faces`, `--color jpeg`, ...), the same as its sender's.
 - A pipeline that raises is reported, and after 30 errors in a row dropped; the other streams carry on. When none is left the engine exits 2.
 - Cost: about the **sum** of the streams (measured on an idle RTX 3060, per frame excluding decoding: hands 3-5 ms, face 2-7 ms, cutout 25-30 ms; together 26-33 fps on a 720p to 1080p source).
   **A real run on a 1080x1920 file, including decoding it, held 18.6 fps for hands + face + cutout** (`123.webm`, 186 frames in 10 s): decoding a large file is not free, and a webcam at 720p decodes faster.
   Face with a real face costs more than the clips measured (an earlier measurement says about 8 ms).
+
+The Unity host (`com.viitorx.avtar.tracking.vision`) starts exactly this: one `run` for the streams a scene wants (the line is pinned by `args_run_*.txt`, parsed by `tests/test_vision_cli_contract.py`), `hands` / `face` / `cutout` alone when only one is wanted, always with `--parent-pid`.
 
 ## Models
 
@@ -84,8 +87,23 @@ the engine builds the same pipelines). `tools/video/vision_sender.run` still run
 
 ## What is not done (phase 3 scope notes)
 
-- **pip packaging and the compiled exe**: the senders' helper modules live under `tools/`, which `pyproject.toml` does not ship; phase 4 stages them flat for the compiled build. Until then run `python -m viitorx_tracking` from the source tree.
+- **pip packaging**: the senders' helper modules live under `tools/`, which `pyproject.toml` does not ship, so `pip install` of this repository does not give a working engine. The compiled build stages them flat (`build/build_engine.py`); use it, or run `python -m viitorx_tracking` from the source tree.
 - **`body` is a pass-through** to `video_udp_sender.py` (its own loop, pacing and options, no `VTSTATUS` lines, no `--parent-pid`); it is not part of `run`.
 - **`--parent-pid` while waiting for a live source** is noticed after the source's read timeout (a few seconds), not within one.
 - **Model shape check** (a replaced model is only reported by size and hash, not checked against the network's expected inputs and outputs): not built.
 - **Not run on a live camera**: every run so far read video files (and the loop's source handling is the senders' own).
+- **The compiled build**: see `build/README.md` and plan section 13 for what was measured and what was not (the installer was never run; `fetch-models` was not run over the network in the compiled exe; no clean machine; no LAN WebRTC session).
+- **A file source loops forever by default** (`--no-loop` stops at the end; `body` instead stays alive and silent after the last replay). Two runs of the same clip do not give identical values (the frame time is the wall clock): compare with a noise floor, as `tests/verify_build.py` does.
+
+## The release descriptor
+
+`build_engine.py assemble` writes `viitorx-tracking-<version>-win-x64.release.json` beside the zip (give `--base-url` so its `url` is where the zip will be published; without it `url` is empty). It is what an installer
+needs to fetch and check the release, and what the Unity packages' `EngineInstaller` parses (as untrusted input: names that become folder names, sizes and the SHA-256 are validated):
+
+```json
+{ "schema": 1, "name": "viitorx-tracking", "version": "0.1.0", "platform": "win-x64", "file": "viitorx-tracking-0.1.0-win-x64.zip", "url": "",
+  "sha256": "<of the zip>", "sizeBytes": 125062044, "unpackedBytes": 345325767, "topFolder": "viitorx-tracking", "exe": "viitorx-tracking.exe", "wireSpec": "1.0" }
+```
+
+`wireSpec` is `viitorx_tracking.WIRE_SPEC_VERSION`, also printed by `version --json` (`wire_spec`): a host asks the exe once and refuses an engine whose MAJOR number it does not read (the Unity packages do: `EngineCompatibility`).
+The descriptor is only as trustworthy as the place it came from: the SHA-256 protects against a corrupt or swapped zip, not against a release host whose descriptor and zip are both replaced.

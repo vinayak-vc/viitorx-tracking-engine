@@ -4,7 +4,7 @@
 The hands and face wires (hand_wire.py, face_wire.py) are a contract between this repo and the Unity package's parsers
 (Runtime/Vision). A contract written in two languages drifts unless one side's bytes are the other side's test input, so this script
 builds datagrams with the PRODUCTION encoders from synthetic hands and faces of known pose, and writes them to
-<unity repo>/Tests/EditMode/VisionFixtures/. The C# tests parse those files and check the values; tests/test_vision_fixtures.py
+<unity repo>/Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures/. The C# tests parse those files and check the values; tests/test_vision_fixtures.py
 checks the files on disk still equal what the encoders produce today, so a change to a wire field fails HERE first.
 
     .venv\\Scripts\\python.exe tools/video/make_vision_fixtures.py             # (re)write the synthetic fixtures
@@ -40,7 +40,7 @@ import hand_geometry as G
 import hand_tracking as HT
 import hand_wire as HW
 
-FIXTURE_DIR = _os.path.join(EV.UNITY_PROJECT_ROOT, "Tests", "EditMode", "VisionFixtures")
+FIXTURE_DIR = _os.path.join(EV.UNITY_PROJECT_ROOT, "Packages", "com.viitorx.avtar.tracking.vision", "Tests", "Editor", "VisionFixtures")
 
 SESSION_HANDS = "hd0123456789"
 SESSION_FACE = "fc0123456789"
@@ -314,7 +314,7 @@ def write_all(directory, files):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="H-03 golden datagrams for the Unity receivers")
-    ap.add_argument("--out", default=FIXTURE_DIR, help="where to write (default: the Unity repo's Tests/EditMode/VisionFixtures)")
+    ap.add_argument("--out", default=FIXTURE_DIR, help="where to write (default: the Unity repo's Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures)")
     ap.add_argument("--real", action="store_true", help="also capture real_hands.json and real_face.json from the real networks")
     a = ap.parse_args(argv)
     files = synthetic_fixtures()

@@ -2,7 +2,7 @@
 """H-03 tests for the command lines the Unity host starts the senders with.
 
 Unity's VisionSenderArguments builds them from the "Hands and Face" settings of AppBootstrap; the expected lines are fixtures in the Unity repo
-(Tests/EditMode/VisionFixtures/args_*.txt), asserted byte-for-byte by VisionSenderArgumentsTests on the C# side. Here the SAME lines are parsed by
+(Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures/args_*.txt), asserted byte-for-byte by VisionSenderArgumentsTests on the C# side. Here the SAME lines are parsed by
 the senders' own argparse parsers: every flag must be one the sender accepts (an unknown flag makes Python exit before the camera opens, which the
 host would show only as a dead sender) and must land in the field the setting is named for.
 """
@@ -95,6 +95,33 @@ check(a.guided is False and a.cleanup is False and a.tta is True, "guided off, c
 check(a.color == "jpeg" and a.jpeg_quality == 70 and a.mask_enc == "deflate" and a.send_long_side == 960 and a.chunk_bytes == 1200,
       "JPEG at quality 70, a deflated mask, 960 px, 1 200 B datagrams")
 check(a.rotate == 90 and a.provider == "cpu" and a.camera_size == [640, 480] and a.camera_fps == 15, "rotation, provider, camera size, fps")
+
+print("")
+print("THE COMBINED LINE (viitorx-tracking run: one process, one camera, several streams) CONFIGURES EACH STREAM AS ITS OWN LINE DOES")
+from viitorx_tracking import cli as ENGINE_CLI  # noqa: E402
+import types as _types  # noqa: E402
+
+PARSERS = {"hands": HS.build_parser, "face": FS.build_parser, "cutout": CS.build_parser}
+SINGLE = {"default": {"hands": "args_hands_default.txt", "face": "args_face_default.txt", "cutout": "args_cutout_default.txt"},
+          "custom": {"hands": "args_hands_custom.txt", "face": "args_face_custom.txt", "cutout": "args_cutout_custom.txt"}}
+for variant in ("default", "custom"):
+    line = open(os.path.join(MF.FIXTURE_DIR, "args_run_%s.txt" % variant), encoding="utf-8").read().strip()
+    head, segments = ENGINE_CLI._split_streams(shlex.split(line))
+    check([n for n, _ in segments] == ["hands", "face", "cutout"], "%s: the three streams, in order" % variant)
+    check("--port" not in head and "--flip" not in head and "--no-flip" not in head, "%s: no stream option sits before the first --stream" % variant, " ".join(head)[:60])
+    parsed = {}
+    for name, args in segments:
+        parsed[name] = PARSERS[name]().parse_args(head + args)
+    first = next(iter(parsed.values()))
+    same_source = all(getattr(a, d) == getattr(first, d) for a in parsed.values() for d in ENGINE_CLI._COMMON_DESTS)
+    check(same_source, "%s: every source option is the same for every stream (what the engine requires)" % variant)
+    check(len(set(a.port for a in parsed.values())) == 3, "%s: three different ports" % variant, str(sorted(a.port for a in parsed.values())))
+    for name in ("hands", "face", "cutout"):
+        single = parse(PARSERS[name], SINGLE[variant][name])
+        check(vars(parsed[name]) == vars(single), "%s: the %s stream reads exactly the options its single-stream line gives" % (variant, name))
+    check(parsed["hands"].flip == parsed["face"].flip and parsed["hands"].flip != parsed["cutout"].flip,
+          "%s: the mirror differs between hands/face and the cutout, as the engine's per-stream flip allows" % variant)
+    check(len(shlex.split(line)) > 0 and line.count("--stream") == 3 and line.count("--video") == 1, "%s: the source is named once" % variant)
 
 print("")
 print("THE DEFAULT PORTS ARE THE WIRES' OWN")

@@ -137,13 +137,15 @@ def _split_streams(rest):
     return head, segments
 
 
-#: Source options every stream shares; they are set once, before the first --stream.
-_COMMON_DESTS = ("video", "rotate", "flip", "crop", "loop", "realtime", "seconds", "show", "camera_size", "camera_fps", "cache_dir")
+#: Source options every stream shares; they are set once, before the first --stream. `--flip` is NOT one of them: the camera is read and rotated once,
+#: and each stream mirrors its own copy if it wants to (hands and face want a selfie mirror, the cutout does not).
+_COMMON_DESTS = ("video", "rotate", "crop", "loop", "realtime", "seconds", "show", "camera_size", "camera_fps", "cache_dir")
 
 
 def _build_streams(segments, head, engine, directory, out):
-    """Parse each stream's options with its own parser, check the models, build the pipelines. Returns (streams, None) or (None, exit code)."""
-    streams = []
+    """Parse every stream's options with its own parser and check them against each other (nothing is loaded yet), then check the models and build the
+    pipelines one by one. Returns (streams, None) or (None, exit code)."""
+    parsed = []
     first = None
     ports = []
     for name, args in segments:
@@ -165,6 +167,9 @@ def _build_streams(segments, head, engine, directory, out):
             out("two streams were given the same UDP port (%d): one sender per port" % a.port)
             return None, exitcodes.USAGE_OR_SOURCE
         ports.append(a.port)
+        parsed.append((name, module, parser, a))
+    streams = []
+    for name, module, parser, a in parsed:
         rebase_models(name, parser, a, directory)
         missing = missing_models(name, a)
         if missing:

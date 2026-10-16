@@ -746,7 +746,9 @@ def list_cameras():
     return 0 if found else 1
 
 
-def main():
+def build_parser():
+    """The command line of the sender (and of `viitorx-tracking body`, which passes its options here). A function of its own so the Unity host's command
+    lines can be parsed by the real parser in tests."""
     ap = argparse.ArgumentParser(description="F-49 video-driven sidecar")
     ap.add_argument("--video", default=None,
                     help="a local path, a direct http(s) video link, a page yt-dlp can resolve, "
@@ -838,6 +840,11 @@ def main():
     ap.add_argument("--det-conf", type=float, default=0.45,
                     help="F-52: person-detector confidence. 0.45 is the OAK-D path's value, not yet "
                          "tuned for this detector.")
+    return ap
+
+
+def main():
+    ap = build_parser()
     a = ap.parse_args()
 
     if a.list_cameras:

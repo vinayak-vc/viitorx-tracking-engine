@@ -39,7 +39,7 @@ def parent_alive(pid):
         return False
 
 
-class StopSignal(object):
+class StopSignal:
     """One flag a loop checks. Set by a watcher thread (stdin closed) or by the loop itself (parent gone); says why."""
 
     def __init__(self):
@@ -55,7 +55,7 @@ class StopSignal(object):
         return self._event.is_set()
 
 
-class ParentWatch(object):
+class ParentWatch:
     """Checked from the frame loop at most once a second: cheap enough to call every frame."""
 
     def __init__(self, pid, stop, alive=parent_alive, clock=time.time, interval=1.0):
@@ -95,7 +95,7 @@ def watch_stdin(stop, stream=None):
     return t
 
 
-class StatusEmitter(object):
+class StatusEmitter:
     """Writes `VTSTATUS {json}` lines. `write` is injectable for tests (default: print to standard output, flushed)."""
 
     def __init__(self, enabled=True, write=None, clock=time.time, pid=None):

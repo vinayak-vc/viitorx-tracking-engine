@@ -23,13 +23,16 @@ Plan: `docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md` (same text as the U
 - [x] Phase 0 (2026-10-16): tag `pre-packaging` and branch `package-v1` created here. Renamed on GitHub to `viitorx-tracking-engine` by the user; remote URL updated.
 - [x] Phase 1 (2026-10-16): **GO**, see the plan, section 10.
 - [x] Phase 2 (2026-10-16): `docs/WIRE.md` v1.0, `tools/video/make_wire_conformance.py`, `tests/test_wire_spec.py` 64/64 (plan section 11). 
-- [x] Phase 3 (2026-10-16): `viitorx_tracking/` (CLI, `run --streams`, registry + `fetch-models`, manifest check, lifecycle, exit codes), `docs/ENGINE.md`, `tests/test_engine.py` 113/113, 40 of 41 mutants caught. Layer over the unchanged modules (plan section 12). Next: Phase 4 (compiled build, installer). Phase 3: extract the source handling from `tools/`, add `body`, `verify`, `--parent-pid`.
+- [x] Phase 3 (2026-10-16): `viitorx_tracking/` (CLI, `run --streams`, registry + `fetch-models`, manifest check, lifecycle, exit codes), `docs/ENGINE.md`, `tests/test_engine.py` 113/113, 40 of 41 mutants caught. Layer over the unchanged modules (plan section 12). Next: Phase 4 (compiled build, installer).
+- [x] Phase 4 (2026-10-16): `build/build_engine.py` (flat stage by AST closure, Nuitka standalone, notices, manifest, zip + SHA-256, Inno Setup), `build/installer.iss`, `tests/test_build.py` 99/99, `tests/verify_build.py` 65/65 on the real build (plan section 13). Open: run the installer (admin), `fetch-models` frozen over the network, clean machine, LAN WebRTC, size trim. Next: Phase 5 (Unity packages).
+- [x] Phase 5a (2026-10-16, Unity repo): core / sidecar / vision / cutout packages extracted; the golden fixtures moved to `Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures` (`make_vision_fixtures.FIXTURE_DIR` updated; `test_vision_fixtures` 93, `test_vision_cli_contract` 36, `test_wire_spec` 64 pass). Plan section 15.
+- [x] Phase 5b (2026-10-16): `run --stream` takes `--flip` PER STREAM (camera read once, a mirrored copy for the stream that wants it); `_build_streams` validates all streams before loading models; `tools/video/make_run_fixtures.py` + `args_run_*.txt`; `test_engine` 123/123, `test_vision_cli_contract` 54/54; flip mutants 9/9. The Unity host starts ONE `run` for several streams (plan section 16). Phase 3: extract the source handling from `tools/`, add `body`, `verify`, `--parent-pid`.
 - [ ] Move research (`evidence/`, harness `tools/`, `depthai_blazepose/`) out of the shipped layout.
 
 ## ✅ H-04 — Unity hosts the hands and face senders (2026-10-13) — BUILT AND TESTED HEADLESS; NOT RUN IN PLAY MODE
 
 Unity repo: `docs/H04_VISION_BOOTSTRAP_AND_SHOWCASE_2026-10-13.md` (the report), `docs/decisions.md` **ADR-102**, `docs/tasks.md` H-04, `Showcase/HandsFace/README.md`. No sender or wire change: the Unity `VisionHost` starts `tools/hands/hands_udp_sender.py` and `tools/face/face_udp_sender.py` with flags built from its settings.
-- [x] `tests/test_vision_cli_contract.py` (20 assertions) parses the four command-line fixtures in the Unity repo (`Tests/EditMode/VisionFixtures/args_*.txt`) with the senders' own `build_parser()`.
+- [x] `tests/test_vision_cli_contract.py` (20 assertions) parses the four command-line fixtures in the Unity repo (`Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures/args_*.txt`) with the senders' own `build_parser()`.
 - [ ] **NOT TESTED: Unity starting these senders (the process, a live camera, stopping on scene exit).**
 - [ ] If a sender flag is renamed or removed: update `VisionSenderArguments` in the Unity repo and the `args_*.txt` fixtures; this test fails first.
 - [ ] Next: a combined hands + face sender, so one camera can feed both.
@@ -37,7 +40,7 @@ Unity repo: `docs/H04_VISION_BOOTSTRAP_AND_SHOWCASE_2026-10-13.md` (the report),
 ## ✅ H-03 — Unity receivers for the hands and face wires (2026-10-13) — BUILT AND TESTED HEADLESS; NOT RUN IN THE EDITOR
 
 Unity repo: `docs/H03_UNITY_RECEIVERS_2026-10-13.md` (the report), `docs/decisions.md` **ADR-101**, `docs/tasks.md` H-03, `Runtime/Vision/README.md`. No wire change: the hands (8901) and face (8902) datagrams are read as they are.
-- [x] `tools/video/make_vision_fixtures.py` writes 22 golden datagrams with `hand_wire` / `face_wire` from the synthetic hands and faces into the Unity repo's `Tests/EditMode/VisionFixtures`; `--real` captures what the real networks emitted. `tests/test_vision_fixtures.py` (45 assertions) fails if the checked-in files drift from the encoders.
+- [x] `tools/video/make_vision_fixtures.py` writes 22 golden datagrams with `hand_wire` / `face_wire` from the synthetic hands and faces into the Unity repo's `Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures`; `--real` captures what the real networks emitted. `tests/test_vision_fixtures.py` (45 assertions) fails if the checked-in files drift from the encoders.
 - [x] The C# side: 86 tests pass headless, 36 of 36 injected bugs caught, 0 bytes allocated per parse (net9).
 - [ ] **NOT TESTED: the Unity Editor compile and Play mode of the scene components; a live camera; a rigged character.**
 - [ ] If a wire field changes: edit the encoder, run `make_vision_fixtures.py`, run both suites, write the ADR in both repos.

@@ -162,7 +162,7 @@ payload = b"0123456789" * 10
 good = registry.ModelSpec("hands", "g.onnx", "https://example.invalid/g", len(payload), registry.hashlib.sha256(payload).hexdigest(), True)
 
 
-class FakeResponse(object):
+class FakeResponse:
     def __init__(self, data):
         self._io = io.BytesIO(data)
 
@@ -194,7 +194,7 @@ try:
             raised = True
         check(raised and not os.path.exists(target) and not os.path.exists(target + ".part"), "%s is refused and leaves nothing" % label)
 
-    class Runaway(object):
+    class Runaway:
         """A response that never ends (one byte per read, ten thousand reads): a cap that is missing shows as reads far past the file's size."""
         def __init__(self):
             self.reads = 0
@@ -307,7 +307,7 @@ print("")
 print("RUN_MANY: one source, several pipelines")
 
 
-class FakeCap(object):
+class FakeCap:
     def __init__(self, frames, fps=30.0):
         self.frames = frames
         self.i = 0
@@ -336,7 +336,7 @@ class FakeCap(object):
         self.released = True
 
 
-class FakePipeline(object):
+class FakePipeline:
     def __init__(self, label, fail=False, fail_first=0, fail_every=0):
         self.label = label
         self.fail = fail
@@ -467,6 +467,46 @@ try:
     drain(s2)
     check(pa.restarts >= 1 and pb.restarts == pa.restarts and (1, 0) in cap.sets, "looping a file rewinds it and restarts every pipeline")
 
+    # per-stream flip: the camera is read and rotated once, each stream mirrors its own copy
+    def asymmetric(frame, rotate, flip):
+        out_frame = np.zeros((24, 32, 3), dtype=np.uint8)
+        out_frame[:, 0, 0] = 1       # the left edge
+        out_frame[:, -1, 0] = 2      # the right edge
+        flips_seen.append(flip)
+        return out_frame
+
+    flips_seen = []
+    pa, pb = FakePipeline("a"), FakePipeline("b")
+    code, lines, events = run([stream_for("a", pa, p1, flip=True), stream_for("b", pb, p2, flip=False)], common_args(), FakeCap(6), orient=asymmetric)
+    ga, gb = drain(s1), drain(s2)
+    check(flips_seen == [False] * 6, "streams that disagree about the mirror: the shared frame is oriented WITHOUT one", str(flips_seen[:3]))
+    check(pa.processed == [2] * 6 and pb.processed == [1] * 6, "the stream that wants the mirror gets a mirrored copy; the other gets the camera as it is")
+    check(all(m["mirrored"] is True for m in ga) and all(m["mirrored"] is False for m in gb), "each datagram is encoded with its OWN stream's mirror flag")
+
+    flips_seen = []
+    pa, pb = FakePipeline("a"), FakePipeline("b")
+    code, lines, events = run([stream_for("a", pa, p1, flip=True), stream_for("b", pb, p2, flip=True)], common_args(), FakeCap(5), orient=asymmetric)
+    ga, gb = drain(s1), drain(s2)
+    check(flips_seen == [True] * 5 and pa.processed == [1] * 5 and pb.processed == [1] * 5, "streams that agree: the flip is applied once while orienting (no extra copy)")
+    check(all(m["mirrored"] is True for m in ga + gb), "and every datagram says it was mirrored")
+
+    flips_seen = []
+    pa = FakePipeline("a")
+    code, lines, events = run([stream_for("a", pa, p1, flip=True)], common_args(), FakeCap(4), orient=asymmetric)
+    ga = drain(s1)
+    check(flips_seen == [True] * 4 and all(m["mirrored"] is True for m in ga), "one stream alone behaves as the single-stream sender always did")
+
+    base = np.arange(24 * 32 * 3, dtype=np.uint8).reshape(24, 32, 3)
+    copy = multi.mirror_copy(base)
+    check(np.array_equal(copy, base[:, ::-1]) and copy.flags["C_CONTIGUOUS"], "mirror_copy is the frame mirrored left to right and contiguous")
+    copy[0, 0, 0] = 255 - copy[0, 0, 0]
+    check(not np.array_equal(copy, base[:, ::-1]) and base[0, 0, 0] == 0, "mirror_copy is a copy: writing to it never touches the shared frame")
+    try:
+        import cv2
+        check(np.array_equal(multi.mirror_copy(base), cv2.flip(base, 1)), "mirror_copy equals cv2.flip(frame, 1), what the single-stream sender uses")
+    except ImportError:
+        pass
+
     # stop signal and parent
     stop = lifecycle.StopSignal()
     stop.set("the host asked")
@@ -551,8 +591,13 @@ check(cli.main(["run", "--stream", "hands", "--stream", "hands"], out.append) ==
 out[:] = []
 check(cli.main(["run", "--stream", "banana"], out.append) == exitcodes.USAGE_OR_SOURCE and any("unknown stream" in l for l in out), "run: an unknown stream is refused")
 out[:] = []
-check(cli.main(["run", "--stream", "hands", "--flip", "--stream", "face"], out.append) == exitcodes.USAGE_OR_SOURCE and any("must be the same for every stream" in l for l in out),
-      "run: a source option that differs between streams is refused")
+empty_models = tmpdir()      # a mutated check must end at "models missing" quickly, never reach a camera
+check(cli.main(["run", "--models-dir", empty_models, "--stream", "hands", "--rotate", "90", "--stream", "face"], out.append) == exitcodes.USAGE_OR_SOURCE
+      and any("must be the same for every stream" in l for l in out), "run: a source option that differs between streams is refused (before any model is looked at)")
+out[:] = []
+code_flip = cli.main(["run", "--models-dir", empty_models, "--stream", "hands", "--flip", "--stream", "cutout", "--no-flip"], out.append)
+check(code_flip == exitcodes.MODELS_MISSING and not any("must be the same" in l for l in out),
+      "run: --flip may differ between streams (it gets as far as the models), the camera is shared and each stream mirrors its own copy")
 out[:] = []
 check(cli.main(["run", "--stream", "hands", "--port", "7001", "--stream", "face", "--port", "7001"], out.append) == exitcodes.USAGE_OR_SOURCE
       and any("same UDP port (7001)" in l for l in out), "run: two streams on one port are refused before any model loads")

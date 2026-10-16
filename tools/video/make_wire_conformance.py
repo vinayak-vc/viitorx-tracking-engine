@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 2 - THE CONFORMANCE FILE: the expected result of every golden datagram, in one machine-readable file.
 
-`docs/WIRE.md` section 8 says a receiver is conformant when it passes the golden datagrams (`Tests/EditMode/VisionFixtures/` in the Unity repo,
+`docs/WIRE.md` section 8 says a receiver is conformant when it passes the golden datagrams (`Packages/com.viitorx.avtar.tracking.vision/Tests/Editor/VisionFixtures/` in the Unity repo,
 written by `make_vision_fixtures.py`). A receiver in another language should not have to read C# tests to learn what each file must produce, so this
 script reads every datagram with the PYTHON REFERENCE PARSERS (hand_wire, face_wire, cutout_wire) and writes what they found to
 `conformance.json` beside the fixtures:

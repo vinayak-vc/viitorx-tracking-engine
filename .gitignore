@@ -9,6 +9,9 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# the engine's own build scripts live in /build; only their output is ignored
+!/build/
+/build/out/
 develop-eggs/
 dist/
 downloads/

@@ -480,3 +480,18 @@ The owner tagged and pushed `v0.1.0` (Unity repository, commit `aa9084d`) and `e
 **Not run yet:** the steps after the tests (compile on a clean runner, assemble, installer, upload, attach). They have never executed on GitHub. The fix is not committed or pushed (the owner's repository).
 
 **Open decisions (the owner's, because they change published tags):** the engine tag points at a commit whose workflow run failed, and the Unity tag's changelogs say unreleased. Either move both tags to commits that fix these (delete and re-push, which anyone who fetched the old tag will notice), or leave them and make `engine-v0.1.1` and `v0.1.1` (versions must be bumped: the workflow requires the tag to equal `__version__`), or attach the locally built engine assets to a release by hand.
+
+## 22. Release 0.1.1 (Option 2 executed), 2026-10-17
+
+Existing tags `v0.1.0` and `engine-v0.1.0` remain published and unchanged. Releases `v0.1.1` and `engine-v0.1.1` were cut to resolve the CI test failure and finalize package changelogs.
+
+**Engine fixes and release:**
+- `tests/test_engine.py`: installed depthai stand-in in RUN_MANY section before multi import; version checks use dynamic `__version__`.
+- `build/build_engine.py`: added `buildenv` and `venv` (and `pyvenv.cfg` detection) to `SKIP_DIRS` in `module_index` so runner virtual environments are excluded from the module closure.
+- Tagged `engine-v0.1.1` and pushed to GitHub.
+
+**Unity packages:**
+- `Packages/com.viitorx.avtar.tracking*`: bumped to 0.1.1 via `bump_version.py bump 0.1.1`, finalized with `bump_version.py finalize 2026-10-17`.
+- `release_check.py --release` passed with 0 problems across all 6 packages.
+- Engine submodule pointer updated.
+

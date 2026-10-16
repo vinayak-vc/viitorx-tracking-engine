@@ -37,7 +37,7 @@ COMPANY = "ViitorCloud"
 PRODUCT = "Viitorx Tracking Engine"
 
 #: Folders of the repository that never hold a module the engine imports (research output, harnesses, tests, vendored OAK-D port, documents).
-SKIP_DIRS = frozenset((".venv", "evidence", "tests", "__pycache__", "depthai_blazepose", "armaim", "capture", "diagnostics", "ownership",
+SKIP_DIRS = frozenset((".venv", "venv", "buildenv", "evidence", "tests", "__pycache__", "depthai_blazepose", "armaim", "capture", "diagnostics", "ownership",
                        "validation", "deployment", "build", "docs", "scripts", "models", "f19_evidence", "pipeline_logs", "viitorx_tracking"))
 
 #: Imported by the senders at module level but never used on the engine's paths (OAK-D). `bootstrap.ensure_depthai` installs a stand-in at run time.
@@ -62,7 +62,7 @@ def module_index(root):
     """{module name: [paths]} of every .py outside SKIP_DIRS, at the root and below."""
     index = {}
     for folder, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith(".") and not os.path.isfile(os.path.join(folder, d, "pyvenv.cfg")))
         for name in sorted(files):
             if name.endswith(".py"):
                 index.setdefault(name[:-3], []).append(os.path.join(folder, name))

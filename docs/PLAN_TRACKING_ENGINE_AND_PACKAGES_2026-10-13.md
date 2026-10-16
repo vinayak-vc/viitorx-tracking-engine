@@ -451,3 +451,18 @@ The merge of `BodyAvatarDriver` with `AppBootstrap` was skipped by decision; thi
 - The packages' registry question is open (git URLs / OpenUPM / own registry: `docs/RELEASING.md`). Unity does not, to my knowledge, install the umbrella's siblings from git URLs.
 - Engine and packages are matched by the wire spec MAJOR only; code signing is a release decision; there is no CI for the Unity suites (they need a licensed Unity and, for some tests, a GPU); the gate could run anywhere Python does.
 - The `fetch-models` download in the frozen exe, the real webcam / LAN camera runs, a clean machine and the Unreal plugin are as before.
+
+## 20. The first install from git, 2026-10-17
+
+The owner pushed branch `package-v1` of the Unity repository (commit `3db7df3`, with the six packages, `tools/release/` and the docs) and of the engine repository (`7855bc8`, with the release descriptor and the workflow). No tag exists yet.
+
+**Run (a fresh Unity 6000.3 project, manifest with the five packages by git URL `...?path=/Packages/<name>#package-v1`; Animation Rigging and UniVRM as local copies so that nothing else is downloaded):**
+- all five packages resolved from GitHub into `Library/PackageCache` (the repository is 16 MB packed);
+- edit mode **565 of 565**, play mode **47 of 47** (with the real engine), samples imported with the Package Manager from the git-installed packages and played **5 of 5**: the bytes that were pushed are the bytes that were tested;
+- **measured:** a manifest with ONLY the umbrella by git URL fails to resolve (*Package [com.viitorx.avtar.tracking.core@0.1.0] cannot be found*, and the same for each sibling), so `docs/INSTALL.md` and the umbrella's README now say: from git, name the packages, never the umbrella;
+- new `tools/release/git_install_block.py <ref> [packages] [--apply manifest.json]` prints (or merges) the manifest lines with each package's dependencies added and never the umbrella; 16 tests, 9 of 9 mutants caught; its output was installed in the fresh project and 341 edit-mode tests ran from it.
+
+**Not done / open:**
+- no tag: `#v0.1.0` is the same syntax but untested; after the owner tags, run `git_install_block.py v0.1.0 --apply` in a fresh project;
+- the Unity repository's commit records an older engine commit (`d1bb349`) for the `python-sidecar~` submodule; the engine's pushed branch is at `7855bc8`: the next commit of the Unity repository should update the pointer;
+- the engine release workflow has not run (it needs a pushed tag `engine-v0.1.0`); UniVRM through the OpenUPM registry was not run; nothing was run on another machine or with a real webcam.

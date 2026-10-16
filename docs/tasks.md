@@ -20,6 +20,7 @@ Unity repo: `docs/S01_CUTOUT_2026-10-13.md` (the report), `docs/decisions.md` **
 ## P-01 — Tracking Engine (compiled exe) and Unity packages: PLAN ONLY (2026-10-13)
 
 Plan: `docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md` (same text as the Unity repo's copy). **Nothing implemented.** This repo is planned to become `viitorx-tracking-engine` (renamed in place, history kept): a proper package, one CLI (`hands`, `face`, `body`, ...), no OAK-D in the compiled build (it stays an optional extra for Python users), a Nuitka standalone folder with `models/` beside the exe, `manifest.json`, and an Inno Setup installer.
+- [x] Phase 0 (2026-10-16), local only: tag `pre-packaging` and branch `package-v1` created here (not pushed); the GitHub rename to `viitorx-tracking-engine` waits for the user.
 - [ ] Phase 1 first: the Nuitka compile spike (go / no-go). Phase 2: `WIRE.md`. Phase 3: extract the source handling from `tools/`, add `body`, `verify`, `--parent-pid`.
 - [ ] Move research (`evidence/`, harness `tools/`, `depthai_blazepose/`) out of the shipped layout.
 

@@ -2,7 +2,7 @@
 
 **Status: PLAN ONLY. Nothing in this document has been implemented, and implementation is ON HOLD** until the user finishes one more large feature; the user will then ask for that feature to be studied and added to this plan. All packaging work happens on a branch named **`package-v1`** (created then, in both repos; not before).
 
-**Nothing in this document has been implemented.** Agreed with the user in conversation on 2026-10-13; every "decided" line below is the user's answer. Open items are listed at the end. A copy of this plan lives in both repos (`docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md`).
+**Nothing in this document has been implemented.** Section 9 amends sections 1, 5 and 6 for the cutout work (S-01, HE-01); where they disagree, section 9 wins. Agreed with the user in conversation on 2026-10-13; every "decided" line below is the user's answer. Open items are listed at the end. A copy of this plan lives in both repos (`docs/PLAN_TRACKING_ENGINE_AND_PACKAGES_2026-10-13.md`).
 
 Goal: use the hands, face and body tracking from any other project as a plug-in, with the Python side shipped as a compiled, portable program that nobody has to set up, and the Unity side as UPM packages. Unreal and other engines come later; for them the **wire** is the product.
 
@@ -108,3 +108,37 @@ UniVRM (`com.vrmc.vrm`) is not on Unity's registry and Mediapipe (`com.github.ho
 3. ~~C compiler for Nuitka~~ **Checked 2026-10-13 on this machine:** Visual Studio Community 2022 17.14 with the C++ tools (MSVC 14.44.35207, `cl.exe` under `VC\Tools\MSVC.44.35207in\Hostx64d`, not on PATH: Nuitka finds it itself or runs from a Developer prompt), Windows SDK 10.0.26100.0, and **Inno Setup 6** (`ISCC.exe`) are installed. Python is 3.10.0 (the project venv too). Nuitka and its helpers are not installed: phase 1 creates a separate build venv for them (not the runtime venv). Disk: about 37 GB free on D:.
 4. The next feature the user will add (unknown scope): re-read this plan against it before phase 0.
 5. Registry choice (git URL first; OpenUPM or a private registry later).
+
+## 9. Amendments after S-01 (cutout) and HE-01 (Human Echo), 2026-10-16
+
+The user's next feature was the cutout (S-01, ADR-103, UDP 8903) and Human Echo (HE-01, ADR-104). Studied read-only on 2026-10-16 against `docs/S01_CUTOUT_2026-10-13.md` and `docs/HE01_HUMAN_ECHO_2026-10-14.md`: the Python modules, the 26 golden cutout datagrams, the Unity receivers, textures, view and shaders, and the Launcher rows exist; the Python suites re-run with exactly the documented counts (100 / 66 / 35 / 93 / 36). The user confirmed on 2026-10-16: **this is the whole feature for now; cutout goes into the v1 engine; the render package is split off; Human Echo stays outside the packages; the docs' stale "not tested" lines are to be corrected when work resumes.**
+
+### 9.1 What changes
+
+| Area | Change |
+|---|---|
+| Wire spec (phase 2) | Four wires, not three: hands 8901 and face 8902 (JSON), body 8899, **cutout 8903 (binary, chunked)**: a 72-byte header on every datagram (session, frame number, chunk index / count / offset, sizes, encodings, flags, model id, people, latency figures), colour as raw RGBA32 / JPEG / none, mask as raw A8 / raw deflate, top row first, newer frame abandons an older unfinished one. `WIRE.md` describes it separately from the JSON streams and ships the 26 `cutout_*.bin` goldens as its conformance set. |
+| Engine subcommands | Add **`cutout`**. Models it needs, all fetched into `models/` with SHA-256 checks: the MediaPipe selfie segmenter (general 256x256 and landscape 256x144, 0.46 MB each) and the person detector `yolox_s.onnx` (36 MB; `fetch_yolox_s.py` exists). Without the detector the sender falls back to the whole picture and says so. |
+| **One-camera mode (new, v1)** | Today hands, face and cutout are three programs that each open the camera, and a webcam or a LAN-camera viewer can be read by one program at a time. The engine gets **`run --streams hands,face,cutout`** (any subset): ONE process opens the source once and runs the requested pipelines on each frame, each sending to its own port. The single-stream subcommands stay. The Unity host starts one process for whatever streams the scenes want (today: one process per stream) and restarts it when the wanted set changes. **Cost, unmeasured:** the pipelines share one GPU and one frame budget (alone: face about 8 ms, cutout 17-22 ms per frame), so the combination may fall below 30 fps. Phase 1 (spike) measures hands + face + cutout together on one source before this is promised. The shared frame loop `vision_sender.run` takes one pipeline today; it must take a list. |
+| depthai | **Not needed at runtime (OAK-D is excluded).** The only problem is an import: `wholebody_udp_sender.py` does `import depthai` at module level and every vision sender reaches it through `vision_sender` -> `video_udp_sender` -> `wholebody_udp_sender`. **Decision: the engine build includes a tiny stub `depthai` module (build-time only; a previous measurement saw zero accesses), so no source file changes and `wholebody_udp_sender.py` stays byte-identical.** A clean extraction can replace the stub later; it is not needed for v1. The compiled engine also leaves out the `onnx` package (FP16 tooling) and aiortc / PyAV only if LAN-camera streaming is dropped (it is not: it is a v1 source, so they stay and their LGPL / FFmpeg notices ship). |
+| Unity packages (phase 5) | `.vision` is split: **`.vision`** (receivers, parsers, host, F6 panel, hands and face views, blendshape driver; depends on Core and Sidecar only) and **`.cutout`** (cutout wire, assembler, textures, `CutoutView`, `Cutout.shader` and `CutoutBackdrop.shader`, `CutoutStreamBinder`; depends on `.vision` and **`com.unity.render-pipelines.universal`**, because the shader includes URP's `Core.hlsl`). The umbrella depends on all five. |
+| Stays outside the packages | **Human Echo** (`Showcase/HumanEcho`): it depends on FluXY (`Assets/FluXY`, a third-party asset that must not be redistributed in a package) and on compute shaders. Also Chromatic Rain, Fluid Disruption, the Launcher and AppBootstrap. They remain the sample application that consumes the packages. The hands, face and cutout sample scenes may ship as `Samples~` of their packages (they need no FluXY). |
+| Settings | `VisionSettings` now has about 55 settings (cutout added 20): a cutout section in the F6 panel and `VisionSenderArguments.Cutout`. The sender command lines stay pinned by the `args_*.txt` fixtures that both the C# tests and the Python argparse parsers consume; the engine renames nothing without updating them. |
+| Engine size and cost | The model set is now palm + hand landmark, face detector + mesh + blendshape, selfie x2, yolox_s, RTMW3D (body): all beside the exe. Cutout on loopback is about 117 MB/s raw at 720p; the engine's defaults for another machine are `--color jpeg --mask-enc deflate --chunk-bytes 1200` (tested only with golden datagrams, never between two machines). |
+| Docs to correct when work resumes | The H-01 to H-04 and S-01 "NOT TESTED" lists are stale: `Editor.log` shows `VisionHost` launching the hands and face senders on `camera:0`, ~30 fps, Auto start and stop working; the user has tested the results and accepts them; the S-01 doc records Play-mode checks on two video files but its "a person on the webcam" item is the user's to restate. Correct from that evidence, and say what the log does not show (what was on screen). |
+
+### 9.2 Phase changes
+
+- **Phase 1 (spike)** also measures: hands + face + cutout in one process on one webcam (fps, GPU time, memory over a few minutes), and the frozen build with the depthai stub.
+- **Phase 2** adds the cutout wire to `WIRE.md` and its conformance checklist.
+- **Phase 3** adds the `cutout` subcommand and `run --streams`; generalises `vision_sender` from one pipeline to a list; keeps `wholebody_udp_sender.py` untouched.
+- **Phase 4** adds the cutout models to the model set and the manifest rules (models still excluded from the program-file check).
+- **Phase 5** splits `.vision` / `.cutout`, adds the one-process host (a stream set change restarts one process), and declares the URP dependency.
+- **Phase 7** unchanged; the user has accepted the tracking results.
+
+### 9.3 New risks
+
+- The one-process combination may not hold 30 fps on the user's GPU (the GPU clock already falls under the paced duty cycle, measured in S-01).
+- Frame rate and latency of cutout over a real network are unmeasured.
+- A shader package requires URP; projects on the built-in pipeline cannot use `.cutout`.
+- The Launcher, Build Settings and the Editor-only scene registration stay per-machine; packages do not fix that.

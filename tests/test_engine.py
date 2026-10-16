@@ -22,7 +22,7 @@ import _sidecar_path  # noqa: F401
 
 import numpy as np
 
-from viitorx_tracking import bootstrap, cli, exitcodes, fetch, lifecycle, manifest, multi, registry
+from viitorx_tracking import bootstrap, cli, exitcodes, fetch, lifecycle, manifest, multi, registry, __version__
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PASS = 0
@@ -295,7 +295,7 @@ em = lifecycle.StatusEmitter(enabled=True, write=written.append, clock=lambda: 1
 line = em.emit("ready", streams=["hands"], live=True)
 rec = lifecycle.parse_status_line(line)
 check(line.startswith("VTSTATUS {") and rec["event"] == "ready" and rec["pid"] == 77 and rec["t"] == 12.346 and rec["streams"] == ["hands"], "a status line is VTSTATUS plus one JSON object")
-check("\n" not in line and rec["engine"] == "0.1.0", "it is one line and carries the engine version")
+check("\n" not in line and rec["engine"] == __version__, "it is one line and carries the engine version")
 check(lifecycle.parse_status_line("[hands] frames=3") is None and lifecycle.parse_status_line("VTSTATUS {broken") is None, "other lines and broken ones are not status")
 check(lifecycle.parse_status_line('{"event":"ready"}') is None, "a JSON line without the VTSTATUS prefix is not a status line")
 check(lifecycle.parse_status_line("x" * len(lifecycle.STATUS_PREFIX) + '{"event":"ready"}') is None, "nor is a line that only has the prefix's length in front of valid JSON")
@@ -305,6 +305,7 @@ check(lifecycle.StatusEmitter(enabled=False, write=written.append).emit("x") is 
 # ------------------------------------------------------------------------------------------------------------------------------ multi loop
 print("")
 print("RUN_MANY: one source, several pipelines")
+bootstrap.ensure_depthai()   # the engine does this before it imports a sender; on a machine without depthai (the build runner) the senders need the stand-in
 
 
 class FakeCap:
@@ -571,7 +572,7 @@ need = [os.path.basename(p) for p, g in cli.missing_models("face", a)]
 check(need == ["face_detector.onnx", "face_landmarks.onnx"], "face --no-blendshapes does not require the blendshape network", str(need))
 
 out = []
-check(cli.main(["version"], out.append) == 0 and out[0].startswith("viitorx-tracking 0.1.0"), "version")
+check(cli.main(["version"], out.append) == 0 and out[0].startswith("viitorx-tracking " + __version__), "version")
 out[:] = []
 cli.main(["version", "--json"], out.append)
 check(json.loads(out[0])["ports"] == {"body": 8899, "cutout": 8903, "face": 8902, "hands": 8901}, "version --json carries the ports")

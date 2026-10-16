@@ -466,3 +466,17 @@ The owner pushed branch `package-v1` of the Unity repository (commit `3db7df3`, 
 - no tag: `#v0.1.0` is the same syntax but untested; after the owner tags, run `git_install_block.py v0.1.0 --apply` in a fresh project;
 - the Unity repository's commit records an older engine commit (`d1bb349`) for the `python-sidecar~` submodule; the engine's pushed branch is at `7855bc8`: the next commit of the Unity repository should update the pointer;
 - the engine release workflow has not run (it needs a pushed tag `engine-v0.1.0`); UniVRM through the OpenUPM registry was not run; nothing was run on another machine or with a real webcam.
+
+## 21. The tag install and the first engine workflow run, 2026-10-17
+
+The owner tagged and pushed `v0.1.0` (Unity repository, commit `aa9084d`) and `engine-v0.1.0` (engine repository, commit `7855bc8`).
+
+**The tag install (fresh Unity 6000.3 project, package cache emptied, manifest written by `git_install_block.py v0.1.0 --apply`):** all five packages resolved at the tag (`packages-lock.json` records `aa9084db` for each); edit mode **565 of 565**, play mode **47 of 47** (with the real engine), samples **5 of 5**. UniVRM and Animation Rigging were local copies.
+
+**What the tag does not satisfy:** `release_check.py --release` on the tagged tree reports six problems, one per package: the changelogs still say `0.1.0 (unreleased)` (the tag was made without `bump_version.py finalize`). The code is what was tested; the changelog headings are not final.
+
+**The first run of the engine workflow (GitHub Actions, push of `engine-v0.1.0`) FAILED** at the step *Tests that need no GPU and no models*, 1m19s in; nothing after it ran, so no release assets exist. Checkout, Python and the build environment steps passed. Cause (read from the log, reproduced locally): `tests/test_engine.py` section RUN_MANY calls `multi.run_many`, which imports the senders, which import `depthai`; the clean runner has no `depthai` (by design: the engine installs a stand-in at run time, `bootstrap.ensure_depthai()`), so the import failed. My machine's environment has the real `depthai`, which hid it. **Fixed in `tests/test_engine.py`** (one line: install the stand-in before that section); reproduced and checked with the build environment (no depthai) and `VT_SKIP_REAL=1`, the workflow's own condition: `test_build` 106/106, `test_engine` 114/114. The workflow's smoke commands were also run against the built exe locally (`version --json`, `print-spec`, `fetch-models --check` on a folder that does not exist: exit 1, as the step expects) and the tag-guard command (`__version__` = 0.1.0).
+
+**Not run yet:** the steps after the tests (compile on a clean runner, assemble, installer, upload, attach). They have never executed on GitHub. The fix is not committed or pushed (the owner's repository).
+
+**Open decisions (the owner's, because they change published tags):** the engine tag points at a commit whose workflow run failed, and the Unity tag's changelogs say unreleased. Either move both tags to commits that fix these (delete and re-push, which anyone who fetched the old tag will notice), or leave them and make `engine-v0.1.1` and `v0.1.1` (versions must be bumped: the workflow requires the tag to equal `__version__`), or attach the locally built engine assets to a release by hand.

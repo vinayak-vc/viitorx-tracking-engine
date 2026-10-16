@@ -205,5 +205,5 @@ public interface and is what semver applies to here.
   [geaxgx/depthai_blazepose](https://github.com/geaxgx/depthai_blazepose). It is the superseded
   Phase-1 path and is not imported by the production pipeline. Its `LICENSE.txt` must stay with it.
 
-[Unreleased]: https://github.com/vinayak-vc/viitorx-vrm-model-python/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/vinayak-vc/viitorx-vrm-model-python/releases/tag/v0.1.0
+[Unreleased]: https://github.com/vinayak-vc/viitorx-tracking-engine/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/vinayak-vc/viitorx-tracking-engine/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
-# viitorx-vrm-model-python
-
-Python **tracking sidecar** for the Virtual Mirror VRM avatar app. It runs pose/hand models on the
+# viitorx-tracking-engine
+ 
+Python **tracking sidecar / engine** for the Virtual Mirror VRM avatar app. It runs pose/hand models on the
 host + OAK-D depth camera and streams landmarks to the Unity client over a local UDP socket. Running
 the model code in a separate process (not a native plugin inside Unity) keeps any DepthAI/GPU
 instability out of the editor — that was the whole point of the sidecar design (ADR-016, "Option B2").
@@ -10,7 +10,7 @@ The Unity consumer lives in the `viitorx-vrm-avtar-unity` project
 
 ## Repository role (submodule)
 
-This repo (`vinayak-vc/viitorx-vrm-model-python`) is consumed as a **git submodule** of the Unity
+This repo (`vinayak-vc/viitorx-tracking-engine`) is consumed as a **git submodule** of the Unity
 project repo `vinayak-vc/viitorx-vrm-avtar-unity`, checked out at:
 
 ```

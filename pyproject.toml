@@ -43,9 +43,9 @@ dependencies = [
 dev = ["Pillow>=10,<12"]
 
 [project.urls]
-Homepage = "https://github.com/vinayak-vc/viitorx-vrm-model-python"
+Homepage = "https://github.com/vinayak-vc/viitorx-tracking-engine"
 "Unity SDK" = "https://github.com/vinayak-vc/viitorx-vrm-avtar-unity"
-Issues = "https://github.com/vinayak-vc/viitorx-vrm-model-python/issues"
+Issues = "https://github.com/vinayak-vc/viitorx-tracking-engine/issues"
 
 [project.scripts]
 virtual-mirror-sidecar = "wholebody_udp_sender:main"

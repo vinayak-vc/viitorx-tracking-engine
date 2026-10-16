@@ -3,7 +3,7 @@
 ## Purpose
 
 This file defines how AI agents must behave when working on **this repository**
-(`vinayak-vc/viitorx-vrm-model-python`).
+(`vinayak-vc/viitorx-tracking-engine`).
 
 It is the Python counterpart to the Unity project's `AGENTS.md`. The two repos have **separate
 responsibilities** (§2) and **separate rules**. Do not apply the Unity C# style rules here, and do not

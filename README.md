@@ -33,6 +33,8 @@ The sidecar owns everything from the sensor up to the UDP datagram. Unity owns e
 | File | Purpose |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | rules for AI agents working here + the **repo responsibility boundary** |
+| [`docs/ENGINE.md`](docs/ENGINE.md) | **the `viitorx-tracking` command line**: hands / face / cutout / body, `run` (one camera, several streams), `fetch-models`, `verify`, exit codes, status lines |
+| [`docs/WIRE.md`](docs/WIRE.md) | **the wire specification** (body, hands, face, cutout): fields, versioning, conformance checklist |
 | [`docs/project-overview.md`](docs/project-overview.md) | what this repo is and is not |
 | [`docs/architecture.md`](docs/architecture.md) | stages, module map, coordinate spaces, failure behaviour |
 | [`docs/decisions.md`](docs/decisions.md) | **ADR-P001…P007** — why every tuned constant is that value |
@@ -568,6 +570,11 @@ after the ADR-065 reorganisation:
 # S-01 cutout: the wire (round trips, reassembly under loss / reorder / repeat / restart / wrap, every malformed datagram), the matte, the engine (scripted detector + fake network),
 # the golden datagrams the Unity tests read, and the command lines Unity builds.
 .venv/Scripts/python.exe tests/test_cutout_wire.py            # 66/66
+# The wire spec: docs/WIRE.md equals the encoders (fields, offsets, the 52 names, ports) and conformance.json equals the parsers' output.
+.venv/Scripts/python.exe tests/test_wire_spec.py              # 64/64
+# The engine package (viitorx_tracking): registry, manifest, fetch-models, lifecycle, the one-source multi-stream loop, the CLI and its exit codes, and a real 3-stream run read off the wire
+# (VT_SKIP_REAL=1 skips that last, slow part).
+.venv/Scripts/python.exe tests/test_engine.py                 # 113/113
 .venv/Scripts/python.exe tests/test_cutout_matte.py           # 35/35
 .venv/Scripts/python.exe tests/test_cutout_engine.py          # 100/100 (+ one real-network check when the weights and clip are present)
 .venv/Scripts/python.exe tests/test_vision_fixtures.py        # 93/93 (the hands, face and cutout fixtures in the Unity repo)

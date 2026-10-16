@@ -217,22 +217,36 @@ def warm_up(general, landscape, detector):
         detector.detect(np.zeros((360, 640, 3), dtype=np.uint8))
 
 
+STREAM_TAG = "cutout"
+
+
+def wire_label():
+    """The wire's description for the startup banner."""
+    return "(wire ver %d, kind %d)" % (WIRE.WIRE_VERSION, WIRE.KIND_FRAME)
+
+
+def build_pipeline(a):
+    """The cutout pipeline for these parsed arguments, with its networks warmed up. Raises FileNotFoundError, ValueError or RuntimeError when
+    a required model cannot be loaded. Shared by main() and by the engine (viitorx_tracking), which runs several pipelines on one source."""
+    providers = VSND.providers_for(a.provider)
+    general, landscape = load_networks(a, providers)
+    detector = load_detector(a, providers)
+    warm_up(general, landscape, detector)
+    return CutoutPipeline(a, build_engine(a, general, landscape, detector), general, landscape, detector)
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     if a.list_cameras:
         return VS.list_cameras()
     print("[cutout] S-01 cutout sender", flush=True)
     print("[cutout]   producer session id = %s" % SESSION_ID, flush=True)
-    providers = VSND.providers_for(a.provider)
     try:
-        general, landscape = load_networks(a, providers)
-        detector = load_detector(a, providers)
+        pipeline = build_pipeline(a)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print("[cutout] ERROR cannot load the models: %s" % e, flush=True)
         return 2
-    warm_up(general, landscape, detector)
-    pipeline = CutoutPipeline(a, build_engine(a, general, landscape, detector), general, landscape, detector)
-    return VSND.run(a, "cutout", SESSION_ID, "(wire ver %d, kind %d)" % (WIRE.WIRE_VERSION, WIRE.KIND_FRAME), pipeline, WINDOW_NAME)
+    return VSND.run(a, "cutout", SESSION_ID, wire_label(), pipeline, WINDOW_NAME)
 
 
 if __name__ == "__main__":

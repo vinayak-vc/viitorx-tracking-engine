@@ -142,3 +142,78 @@ The user's next feature was the cutout (S-01, ADR-103, UDP 8903) and Human Echo 
 - Frame rate and latency of cutout over a real network are unmeasured.
 - A shader package requires URP; projects on the built-in pipeline cannot use `.cutout`.
 - The Launcher, Build Settings and the Editor-only scene registration stay per-machine; packages do not fix that.
+
+## 10. Phase 1 result (compile spike), 2026-10-16
+
+Work area (outside both repos): `D:\viitorx-engine-spike` (`stage.py`, `combined_spike.py`, `SPIKE_LOG.md`). The repos were only read. Build: Python 3.10.0, Nuitka 4.3, MSVC 14.3, `--standalone`; Dependency Walker (`depends22_x64.zip`, dependencywalker.com) downloaded with the user's permission.
+
+**Verdict: GO for Nuitka standalone.**
+
+| Check | Result |
+|---|---|
+| Output | **0 `.py`, 0 `.pyc`**; 131 compiled files; **330 MB** (opencv 99, FFmpeg for the LAN camera 63, onnxruntime 45, numpy 37, exe 36, DirectML 18, cryptography 10). Models are extra: the eight vision models 49 MB; RTMW3D 185 MB (fp16) / 369 MB. |
+| Start | 0.24 s (`version`), 0.45-0.74 s (`--help` of a sender); one folder, nothing unpacked; runs with only the Windows folders on PATH (no Python reachable). |
+| Antivirus | Windows Defender: no detection. Other products and SmartScreen: NOT tested. |
+| DirectML | Works inside the frozen build: every network of hands, face and cutout on `DmlExecutionProvider`. |
+| Senders | hands, face and cutout run from the exe on video files; models found in `models/` beside the exe. |
+| depthai | The build-time stub is enough: 44 staged modules, no `depthai` package, no `onnx`. The staging must read the AST: a `sys.modules` scan (39 modules) missed five lazily imported modules. |
+| Parity, frozen vs source, whole clip `123.webm` | Same frame counts and the same frames-with-a-result: hands 775 / 330, cutout 775 / 571 (people 0 at the end). Hands landmark runs 519 vs 514 (1%): not bit-identical (tracking decisions depend on wall-clock time). |
+| LAN camera | The frozen exe reaches the LAN reader and the aiohttp request for the server's ICE config. **Not a WebRTC session**: needs the camera server, its PIN and a free viewer slot. |
+
+**One process, several pipelines (the "one-camera mode" question), idle RTX 3060, source mode, flat out, per frame including encode and packing:**
+
+| Clip | hands | face | cutout | hands + face | hands + face + cutout |
+|---|---|---|---|---|---|
+| `video.webm` 720x1280, one person | 3.1 ms | 1.5 ms (no face found) | 25.0 ms | 6.2 ms | **30.4 ms (p95 35.4) = 33 fps possible** |
+| `123.webm` 1080x1920, hands present | 4.8 | 5.4 | 25.5 | 9.0 | **36.3 (p95 43.7) = 27.6 fps possible** |
+| `147_1080p.mp4` 1920x1080, two people | 4.2 | 2.4 | 27.9 | 7.1 | **38.7 (p95 43.1) = 25.9 fps possible** |
+
+Reading: the cost of the combination is about the SUM of the parts (no penalty from sharing the GPU), and the cutout is 70-80% of it. At 720p one process holds about 30 fps; at 1080p sources about 26-28. **No clip contains a face the detector finds, so the face cost with a real face is unmeasured here** (H-02 measured 7.9-8.5 ms for a close frontal face: that would add 5-6 ms: expect 23-28 fps for all three at 1080p, about 30 at 720p). Ways to recover headroom, none built: run the cutout on every second frame, or one thread per pipeline. A webcam run with a person in front is needed for a real number (the camera needs the user's permission each time).
+
+**Still open from phase 1:** a real WebRTC session in the frozen build; a clean Windows machine or VM without the dev tools or the Visual C++ runtime; the face cost on a real face; size trimming (opencv ships an FFmpeg next to PyAV's, numpy's OpenBLAS); the engine's messages still say "run tools/model/fetch_hand_models.py" and "Lan Camera Pin on AppBootstrap", and `interpreter :` prints a `python.exe` that does not exist (phase 3).
+
+## 11. Phase 2 result (wire spec), 2026-10-16
+
+**Done: `python-sidecar~/docs/WIRE.md` (spec version 1.0)**, in the engine repo, with the checks that keep it true.
+
+| Piece | What it is |
+|---|---|
+| `docs/WIRE.md` | All four wires in one document: ports, transport, the versioning rules (unknown `ver` ignored; adding an optional member does not bump `ver`; unknown members ignored; the body wire has NO `ver`, so an incompatible body change must use a new port or `kind`), space and units, hands (members, entry, gestures), face (members, entry, the 52 names, head pose), the cutout (72-byte header table, payload, the receiver algorithm, caps), the body wire (single and multi-person members, BlazePose joint order), conversion notes for Unity (tested) and Unreal (derived, NOT tested), a 13-point receiver checklist, and what is not verified. |
+| `tools/video/make_wire_conformance.py` -> `Tests/EditMode/VisionFixtures/conformance.json` | The expected result of all 48 golden datagram files, in one machine-readable file, produced by the Python reference parsers: accepted values (counts, ids, sides, gestures, states, sizes) or the refusal reason; for each cutout chunk family the reassembled frame with the SHA-256 of its colour and mask sections. A receiver in another language drives its conformance test from this file. |
+| `tests/test_wire_spec.py` | **64 assertions**: the field tables in `WIRE.md` equal the encoders' members (hands, face), the cutout header table equals the struct's field names, order, offsets and sizes, the 52 blendshape names equal `face_wire.BLENDSHAPE_NAMES`, the ports and the allocation caps match the code, every body table member appears as a key in a body sender, every cutout reject reason is listed, and `conformance.json` on disk equals what the parsers produce today. |
+| Mutation check | **11 of 11** injected breakages caught: a renamed member, a changed offset and size, two swapped blendshape names, a changed port, an invented member, a renamed body member, a removed marker, a renamed reject reason, and two edits of `conformance.json`. |
+| Regression | `test_vision_fixtures` 93/93, `test_vision_cli_contract` 36/36, `test_hand_wire` 34/34, `test_face_wire` 36/36, `test_cutout_wire` 66/66, all unchanged. |
+
+**Corrections the spec work made to older statements:** the body wire README block omits `sid` (the sender sends it); the `--max-faces` cap of 4 is the Unity host's, not the sender's; for the `bad_*.json` fixtures the Python reference raises one error type, so the exact reason is advisory and only "refused" is checked.
+
+**Not done in phase 2 (open):** a C# test that consumes `conformance.json` (the C# tests assert the same values by hand today); a receiver in a third language (the Unreal conversion is derived, not run); moving the golden files out of the Unity repo into the engine repo (they stay where the C# tests read them; the generator writes them there); the body wire has no encoder module, so its table is checked only against the senders' source, not against bytes.
+
+## 12. Phase 3 result (the engine package), 2026-10-16
+
+**Done in the engine repo (`python-sidecar~`, branch `package-v1`): the package `viitorx_tracking/`, `docs/ENGINE.md`, `tests/test_engine.py`.**
+
+**A deliberate deviation from section 5:** phase 3 was planned as "proper Python package; extract the source handling from `tools/`". It was built as a **layer over the existing modules**, not a physical move:
+the flat modules at the repository root and the senders under `tools/` are unchanged, so the Unity project that runs the Python source directly, the existing suites (390+ assertions) and the compiled build all use the
+same code. The one change to existing code: each sender (`hands_udp_sender`, `face_udp_sender`, `cutout_udp_sender`) gained `build_pipeline(args)`, `wire_label()` and `STREAM_TAG`, and its `main()` now calls them (behaviour identical:
+the existing suites pass and each sender was run for 5 s from source afterwards). The physical restructure (moving `tools/video` source handling to a root module, a pip-installable layout) is deferred to phase 4, where the compiled build
+stages the files flat anyway.
+
+| Piece | What it is |
+|---|---|
+| `viitorx_tracking/cli.py`, `__main__.py` | `viitorx-tracking <hands | face | cutout | body | run | list-cameras | fetch-models | verify | version | print-spec>`, engine options `--no-verify` / `--verify`, `--models-dir`, `--parent-pid`, `--exit-on-stdin-close`, `--status`. `hands`, `face`, `cutout` take their sender scripts' own options; `body` passes through to `video_udp_sender.py`. |
+| `multi.py` | **`run`: one process, one source, several streams.** The generalisation of `vision_sender.run` from one pipeline to a list (that function is untouched). Source options set once before the first `--stream`; each stream sends to its own port; a pipeline that raises is reported and dropped after 30 errors in a row; the others carry on. |
+| `registry.py`, `fetch.py` | The model registry (name, URL, exact size and SHA-256), `fetch-models` (`.part` file, size cap, hash check, never overwrites a user-replaced file, `--check` downloads nothing). A test keeps the registry equal to the `tools/model/fetch_*.py` scripts. All 10 local model files match the registry by hash. |
+| `manifest.py` | `manifest.json` (SHA-256 of every program file), the start-up check (exit 20, names the files), `verify`. Models, logs and downloads are excluded. |
+| `lifecycle.py` | `--parent-pid` (Windows `OpenProcess` + `WaitForSingleObject`), stdin-close exit, the `VTSTATUS {json}` status line (`starting`, `ready`, `heartbeat`, `stopping`, `error`). |
+| `bootstrap.py` | The `depthai` stand-in, installed only where the package is absent: the engine needs no OAK-D, and the senders reach `import depthai` through `wholebody_udp_sender.py`, which stays byte-identical. |
+| `exitcodes.py` | 0 normal, 2 usage / source / model load, 20 program file modified, 21 model missing, 130 interrupted. |
+
+**Verified (source mode, this machine):**
+- `tests/test_engine.py` **113/113**: depthai stand-in, registry vs the fetch scripts, manifest (build, check, exclusions), fetch (a stream that never ends is cut off at the file's size), lifecycle, the loop with scripted pipelines and real UDP sockets (one orient per frame, each stream on its own port, a failing stream dropped while the other runs, restart on loop, stop signal, parent gone, source failure), the CLI and its exit codes, **and a real three-stream run (`hands` + `face` + `cutout` on `123.webm`) read back off the wire: every datagram parses, cutout frames reassemble with nothing refused, one session id per stream, exit 0, VTSTATUS lines on stdout.**
+- **Mutation check: 40 of 41 injected breakages caught** (35 first; five got sharper tests: a size change in the size-only look, `.part` files, the stream cap, a status-prefix lookalike, failures counted "in a row"); the 41st (a short download accepted) is equivalent: the SHA-256 check refuses the same download.
+- By hand: `--parent-pid` of a missing process stops in 1.4 s with exit 0; a closed stdin stops in 1.4 s; a missing model is exit 21 with the fetch command; a missing file source is exit 2; `fetch-models --check` and `verify` report all 10 local models OK.
+- Regression: `test_wire_spec` 64/64, `test_vision_fixtures` 93/93, `test_vision_cli_contract` 36/36, hands/face/cutout wires 34 / 36 / 66, `test_cutout_engine` 100/100, `test_hand_tracking` 52/52, `test_face_tracking` 46/46, `test_video_source` 157/157.
+
+**Measured, and different from the phase 1 sum:** `run` with all three streams on `123.webm` (1080x1920, decoded in the same process) held **18.6 fps** (186 frames in 10 s), against 27.6 fps predicted from the per-frame processing times alone: **decoding a 1080x1920 file is not free**, and the loop is single-threaded. A webcam at 720p decodes faster; not measured here.
+
+**Not done (open):** a model shape check for replaced models (only size and hash are compared); `body` inside `run` (it is a pass-through with its own loop, no `VTSTATUS`, no `--parent-pid`); `--parent-pid` while waiting for a live source is noticed after the source's read timeout (a few seconds); the engine was never run on a live camera, a LAN-camera session or in the frozen build (phase 4); pip packaging (the senders' helper modules under `tools/` are not shipped by `pyproject.toml`); threads per pipeline to recover frame rate.

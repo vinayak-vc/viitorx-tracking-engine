@@ -115,6 +115,24 @@ class FacePipeline(object):
         return "tracked=%d det_runs=%d mesh_runs=%d bs_runs=%d" % (t.track_count, t.detector_runs, t.mesh_runs, t.blend_runs)
 
 
+STREAM_TAG = "face"
+
+
+def wire_label():
+    """The wire's description for the startup banner."""
+    return "(wire ver %d, kind '%s')" % (WIRE.WIRE_VERSION, WIRE.KIND)
+
+
+def build_pipeline(a):
+    """The face pipeline for these parsed arguments. Raises FileNotFoundError, ValueError or RuntimeError when a model cannot be loaded.
+    Shared by main() and by the engine (viitorx_tracking), which runs several pipelines on one source."""
+    providers = VSND.providers_for(a.provider)
+    detector = F.FaceDetector(a.detector_model, providers, score_threshold=a.det_conf)
+    mesh = F.FaceMeshNet(a.mesh_model, providers)
+    blend = F.BlendshapeNet(a.blendshape_model, providers) if a.blendshapes else None
+    return FacePipeline(a, detector, mesh, blend)
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     if a.list_cameras:
@@ -122,16 +140,12 @@ def main(argv=None):
         return VS.list_cameras()
     print("[face] H-02 face-only sender", flush=True)
     print("[face]   producer session id = %s" % SESSION_ID, flush=True)
-    providers = VSND.providers_for(a.provider)
     try:
-        detector = F.FaceDetector(a.detector_model, providers, score_threshold=a.det_conf)
-        mesh = F.FaceMeshNet(a.mesh_model, providers)
-        blend = F.BlendshapeNet(a.blendshape_model, providers) if a.blendshapes else None
+        pipeline = build_pipeline(a)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print("[face] ERROR cannot load the face models: %s" % e, flush=True)
         return 2
-    pipeline = FacePipeline(a, detector, mesh, blend)
-    return VSND.run(a, "face", SESSION_ID, "(wire ver %d, kind '%s')" % (WIRE.WIRE_VERSION, WIRE.KIND), pipeline, WINDOW_NAME)
+    return VSND.run(a, "face", SESSION_ID, wire_label(), pipeline, WINDOW_NAME)
 
 
 if __name__ == "__main__":

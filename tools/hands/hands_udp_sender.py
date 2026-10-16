@@ -130,6 +130,23 @@ class HandsPipeline(object):
         return "tracked=%d det_runs=%d lm_runs=%d" % (t.track_count, t.detector_runs, t.landmark_runs)
 
 
+STREAM_TAG = "hands"
+
+
+def wire_label():
+    """The wire's description for the startup banner."""
+    return "(wire ver %d, kind '%s')" % (WIRE.WIRE_VERSION, WIRE.KIND)
+
+
+def build_pipeline(a):
+    """The hands pipeline for these parsed arguments. Raises FileNotFoundError, ValueError or RuntimeError when a model cannot be loaded.
+    Shared by main() and by the engine (viitorx_tracking), which runs several pipelines on one source."""
+    providers = VSND.providers_for(a.provider)
+    palms = H.PalmDetector(a.palm_model, providers, score_threshold=a.palm_conf)
+    net = H.HandLandmarkNet(a.hand_model, providers)
+    return HandsPipeline(a, palms, net)
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     if a.list_cameras:
@@ -137,16 +154,12 @@ def main(argv=None):
         return VS.list_cameras()
     print("[hands] H-01 hands-only sender", flush=True)
     print("[hands]   producer session id = %s" % SESSION_ID, flush=True)
-    providers = VSND.providers_for(a.provider)
     try:
-        palms = H.PalmDetector(a.palm_model, providers, score_threshold=a.palm_conf)
-        net = H.HandLandmarkNet(a.hand_model, providers)
+        pipeline = build_pipeline(a)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print("[hands] ERROR cannot load the hand models: %s" % e, flush=True)
         return 2
-    pipeline = HandsPipeline(a, palms, net)
-    return VSND.run(a, "hands", SESSION_ID, "(wire ver %d, kind '%s')" % (WIRE.WIRE_VERSION, WIRE.KIND), pipeline,
-                    WINDOW_NAME)
+    return VSND.run(a, "hands", SESSION_ID, wire_label(), pipeline, WINDOW_NAME)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "virtual-mirror-sidecar"
-version = "0.1.1"
+version = "0.1.2"
 description = "Whole-body 3D pose tracking sidecar for the Virtual Mirror Unity SDK. Reads an OAK-D depth camera, runs RTMW3D on the GPU via DirectML, and streams poses to Unity over UDP."
 readme = "README.md"
 license = { file = "LICENSE" }

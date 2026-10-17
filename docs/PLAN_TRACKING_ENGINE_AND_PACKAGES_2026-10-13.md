@@ -509,3 +509,11 @@ Verified from outside, after the owner cut `v0.1.1` (Unity repository, commit `9
 **Added here (engine repository, uncommitted):** a test for the virtualenv skip in `tests/test_build.py` (the owner's fix had none): a virtualenv named `buildenv`, `venv`, an unknown name with only `pyvenv.cfg`, files directly in it and in dot folders, an ordinary folder that is still indexed; `test_build` 111/111; mutation 4 of 4 caught (two first survived: a check that looked in the wrong folder was equivalent for everything but files directly inside the environment, and the dot-folder rule was untested).
 
 **Open:** the owner must commit and push the smoke-step fix and the test, then run the workflow again (a manual run on the branch builds and uploads the artifacts without attaching anything, which tests the remaining steps before another tag is made); the engine tag will have to be moved again or become `engine-v0.1.2`. The engine's own `verify_build` (GPU, models) was not run against the runner's build: only the local build was verified (65/65).
+
+## 24. Release 0.1.2 (Strict SemVer immobility), 2026-10-17
+
+Following manual verification of the build via `workflow_dispatch` (run 39004643082, 14m42s, all steps passed), both repositories cut version `0.1.2` rather than mutating historical tags.
+
+- **Engine (`viitorx-tracking-engine`)**: bumped to `0.1.2` in `viitorx_tracking.__version__` and `pyproject.toml`, tagged `engine-v0.1.2`.
+- **Unity (`viitorx-vrm-avtar-unity`)**: family bumped to `0.1.2` (`bump_version.py bump 0.1.2`), finalized `2026-10-17`, submodule updated, tagged `v0.1.2`.
+

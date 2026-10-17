@@ -9,7 +9,7 @@ needs (`--parent-pid`, a clean exit on stdin close, a JSON status line, stable e
 """
 
 #: The engine's own version (semver). The wires have their own: docs/WIRE.md.
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 #: The wire spec this engine implements (docs/WIRE.md).
 WIRE_SPEC_VERSION = "1.0"

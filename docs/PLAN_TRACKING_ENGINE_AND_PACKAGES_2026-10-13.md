@@ -495,3 +495,17 @@ Existing tags `v0.1.0` and `engine-v0.1.0` remain published and unchanged. Relea
 - `release_check.py --release` passed with 0 problems across all 6 packages.
 - Engine submodule pointer updated.
 
+## 23. Verification of release 0.1.1, 2026-10-17
+
+Verified from outside, after the owner cut `v0.1.1` (Unity repository, commit `99b1d8d`) and `engine-v0.1.1`. Section 22 above is the owner's account of what was done; this is what was checked.
+
+**Packages, tag `v0.1.1`:** installed from GitHub in a fresh Unity 6000.3 project (package cache emptied; manifest lines from `git_install_block.py v0.1.1 --apply`; UniVRM and Animation Rigging local copies). `packages-lock.json` records `99b1d8d0` for all five packages. Edit mode **565 of 565**, play mode **47 of 47** (with the real engine), samples **5 of 5**. `release_check.py --release` on the tagged tree: nothing to report (the `(unreleased)` problem of `v0.1.0` is gone).
+
+**The engine workflow on GitHub, three runs, each one further than the one before:**
+1. `engine-v0.1.0`: failed in *Tests that need no GPU and no models* (no `depthai` on the clean runner; fixed by the stand-in in `tests/test_engine.py`).
+2. `engine-v0.1.1`, first push: failed in *Compile, assemble, installer*: the runner makes its virtualenv `buildenv` INSIDE the checkout, and `module_index` walked it (`json`, `logging`, `types` exist several times: "BUILD FAILED"). Hidden locally because my build environment is outside the repository. The owner's fix skips `buildenv`, `venv` and any folder holding `pyvenv.cfg`.
+3. `engine-v0.1.1`, tag moved to the fix: tests, the tag-names-this-version check, and **compile, assemble and installer all passed on a clean runner (18m37s in total)**; failed in *Smoke test of the built exe*. The log shows every command worked (`version --json` says engine 0.1.1, wire spec 1.0; `print-spec`; `fetch-models --check` exits 1 as the step expects). A `pwsh` step ends with the exit code of the LAST native command, which was that expected 1. **Fix (local, not committed): an explicit `exit 0` after the check.** Never run: *Upload artifact* and *Attach to the release*; no release assets exist yet.
+
+**Added here (engine repository, uncommitted):** a test for the virtualenv skip in `tests/test_build.py` (the owner's fix had none): a virtualenv named `buildenv`, `venv`, an unknown name with only `pyvenv.cfg`, files directly in it and in dot folders, an ordinary folder that is still indexed; `test_build` 111/111; mutation 4 of 4 caught (two first survived: a check that looked in the wrong folder was equivalent for everything but files directly inside the environment, and the dot-folder rule was untested).
+
+**Open:** the owner must commit and push the smoke-step fix and the test, then run the workflow again (a manual run on the branch builds and uploads the artifacts without attaching anything, which tests the remaining steps before another tag is made); the engine tag will have to be moved again or become `engine-v0.1.2`. The engine's own `verify_build` (GPU, models) was not run against the runner's build: only the local build was verified (65/65).

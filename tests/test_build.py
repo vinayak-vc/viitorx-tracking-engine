@@ -91,6 +91,30 @@ check(found2["relative"] == {"alpha": 1}, "a relative import is reported")
 check(found2["dynamic"] == {"alpha": [3, 4]}, "dynamic imports are reported with their lines", str(found2["dynamic"]))
 check(B.third_party_of_package(root2) == {"requests"}, "a third-party import in the engine package is seen")
 
+print("CLOSURE: a virtual environment inside the checkout (the CI runner makes `buildenv` there)")
+venv_root = fake_repo({
+    "viitorx_tracking/cli.py": "import alpha\n",
+    "alpha.py": "",
+    "buildenv/pyvenv.cfg": "home = x\n",
+    "buildenv/Lib/site-packages/engineio/json.py": "",
+    "buildenv/Lib/site-packages/av/logging.py": "",
+    "logging.py": "",
+    "someenv/pyvenv.cfg": "home = x\n",
+    "someenv/Lib/site-packages/zzz/types.py": "",
+    "someenv/rootmod.py": "",
+    ".hidden/dotmod.py": "",
+    "venv/Lib/site-packages/yyy/glob.py": "",
+    "tools/helper/pyvenv.cfg.txt": "",
+    "tools/helper/keepme.py": "",
+})
+venv_index = B.module_index(venv_root)
+check("json" not in venv_index and "types" not in venv_index and "glob" not in venv_index and "rootmod" not in venv_index and "dotmod" not in venv_index, "nothing inside buildenv, venv or another virtual environment is a module of the engine", " ".join(sorted(venv_index)))
+check(len(venv_index.get("logging", [])) == 1, "only the engine's own logging.py is indexed, not the one inside the virtual environment")
+check("keepme" in venv_index and "alpha" in venv_index, "an ordinary folder is still indexed (a file called pyvenv.cfg.txt is not a marker)")
+check(not B.closure(venv_root)["ambiguous"], "so a virtual environment in the checkout cannot make a module name ambiguous")
+unnamed = fake_repo({"viitorx_tracking/cli.py": "", "myenv/pyvenv.cfg": "home = x\n", "myenv/Scripts/mod.py": ""})
+check("mod" not in B.module_index(unnamed), "a virtual environment with a name the build does not know is recognised by its pyvenv.cfg")
+
 print("CLOSURE: the real repository")
 real = B.closure(ROOT)
 for name in ("hands_udp_sender", "face_udp_sender", "cutout_udp_sender", "video_udp_sender", "vision_sender", "host_person_detector", "host_multiperson",

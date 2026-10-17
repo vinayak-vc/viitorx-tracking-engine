@@ -60,6 +60,8 @@ jobs:
           build\out\viitorx-tracking\viitorx-tracking.exe print-spec | Select-Object -First 3
           build\out\viitorx-tracking\viitorx-tracking.exe fetch-models --check --models-dir build\out\empty-models
           if ($LASTEXITCODE -ne 1) { throw "fetch-models --check on an empty folder should exit 1, got $LASTEXITCODE" }
+          # a pwsh step ends with the exit code of the LAST native command: the 1 expected above would fail the step
+          exit 0
 
       - uses: actions/upload-artifact@v4
         with:
